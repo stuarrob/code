@@ -30,7 +30,8 @@
       "Bash(timeout 1800 python scripts/backtest_1m_portfolio.py)",
       "Bash(timeout 1800 python scripts/backtest_weekly_momentum.py)",
       "Bash(chmod:*)",
-      "Bash(awk:*)"
+      "Bash(awk:*)",
+      "Bash(tree:*)"
     ],
     "deny": [],
     "ask": []
