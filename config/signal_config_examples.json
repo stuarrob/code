@@ -1,0 +1,129 @@
+{
+  "configurations": {
+    "default_equal_weight": {
+      "description": "Equal weighting baseline from academic literature (CURRENT DEFAULT)",
+      "indicator_weights": {
+        "RSI_signal": 0.20,
+        "ROC_signal": 0.20,
+        "BB_signal": 0.20,
+        "ADX_signal": 0.20,
+        "CMF_signal": 0.20
+      },
+      "timeframe_weights": {
+        "21": 0.40,
+        "63": 0.35,
+        "126": 0.25
+      },
+      "invert_momentum": false
+    },
+    "momentum_focused": {
+      "description": "Higher weight on momentum indicators",
+      "indicator_weights": {
+        "RSI_signal": 0.25,
+        "ROC_signal": 0.25,
+        "BB_signal": 0.15,
+        "ADX_signal": 0.20,
+        "CMF_signal": 0.15
+      },
+      "timeframe_weights": {
+        "21": 0.40,
+        "63": 0.35,
+        "126": 0.25
+      },
+      "invert_momentum": false
+    },
+    "trend_focused": {
+      "description": "Higher weight on trend indicators",
+      "indicator_weights": {
+        "RSI_signal": 0.15,
+        "ROC_signal": 0.15,
+        "BB_signal": 0.25,
+        "ADX_signal": 0.30,
+        "CMF_signal": 0.15
+      },
+      "timeframe_weights": {
+        "21": 0.40,
+        "63": 0.35,
+        "126": 0.25
+      },
+      "invert_momentum": false
+    },
+    "mean_reversion_experimental": {
+      "description": "EXPERIMENTAL: Mean-reversion strategy with inverted signals (requires validation)",
+      "indicator_weights": {
+        "RSI_signal": 0.30,
+        "ROC_signal": 0.15,
+        "BB_signal": 0.25,
+        "ADX_signal": 0.20,
+        "CMF_signal": 0.10
+      },
+      "timeframe_weights": {
+        "21": 0.40,
+        "63": 0.35,
+        "126": 0.25
+      },
+      "invert_momentum": true,
+      "note": "Based on preliminary 50-ETF analysis showing negative IC. Requires full universe validation."
+    },
+    "short_term_focused": {
+      "description": "More weight on shorter timeframes for active trading",
+      "indicator_weights": {
+        "RSI_signal": 0.20,
+        "ROC_signal": 0.20,
+        "BB_signal": 0.20,
+        "ADX_signal": 0.20,
+        "CMF_signal": 0.20
+      },
+      "timeframe_weights": {
+        "21": 0.60,
+        "63": 0.30,
+        "126": 0.10
+      },
+      "invert_momentum": false
+    },
+    "long_term_focused": {
+      "description": "More weight on longer timeframes for conservative portfolios",
+      "indicator_weights": {
+        "RSI_signal": 0.20,
+        "ROC_signal": 0.20,
+        "BB_signal": 0.20,
+        "ADX_signal": 0.20,
+        "CMF_signal": 0.20
+      },
+      "timeframe_weights": {
+        "21": 0.25,
+        "63": 0.35,
+        "126": 0.40
+      },
+      "invert_momentum": false
+    }
+  },
+  "usage_example_python": {
+    "comment": "Example of loading a custom configuration",
+    "code": [
+      "from src.signals.composite_signal import CompositeSignalGenerator",
+      "",
+      "# Use equal weight baseline (default)",
+      "generator = CompositeSignalGenerator()",
+      "",
+      "# Or load custom configuration",
+      "config = {",
+      "    'indicator_weights': {'RSI_signal': 0.25, 'ROC_signal': 0.25, 'BB_signal': 0.20, 'ADX_signal': 0.20, 'CMF_signal': 0.10},",
+      "    'timeframe_weights': {21: 0.40, 63: 0.35, 126: 0.25},",
+      "    'invert_momentum': False",
+      "}",
+      "",
+      "generator = CompositeSignalGenerator(",
+      "    indicator_weights=config['indicator_weights'],",
+      "    timeframe_weights=config['timeframe_weights'],",
+      "    invert_momentum=config['invert_momentum']",
+      ")"
+    ]
+  },
+  "optimization_roadmap": {
+    "phase_3": "Test configurations on 100-ETF pilot with backtesting",
+    "phase_4": "Optimize weights on full 298-ETF universe with walk-forward validation",
+    "phase_5": "Implement regime-switching (different weights for different market conditions)",
+    "phase_6": "Machine learning weight optimization (if warranted by results)"
+  }
+}

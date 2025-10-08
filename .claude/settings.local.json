@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(source:*)",
+      "Bash(pip install:*)",
+      "Bash(python:*)",
+      "Bash(black:*)",
+      "Bash(jupyter notebook --version)",
+      "Bash(jupyter nbconvert:*)",
+      "Bash(python3:*)",
+      "Bash(timeout 180 python scripts/validate_notebook.py notebooks/01_data_validation.ipynb)",
+      "Read(//home/stuar/.local/share/jupyter/kernels/etftrader/**)",
+      "Bash(timeout 300 python scripts/validate_notebook.py notebooks/01_data_validation.ipynb)",
+      "Bash(pylint:*)",
+      "Bash(timeout 180 python scripts/research_indicator_weights.py)",
+      "Bash(tee:*)",
+      "Bash(cat:*)",
+      "Bash(timeout 3600 python scripts/collect_etf_universe.py)",
+      "Read(//tmp/**)",
+      "Bash(timeout 300 python scripts/test_portfolio_optimization_pilot.py)",
+      "Bash(timeout 300 python scripts/test_portfolio_optimization_300.py)",
+      "Bash(timeout 600 python scripts/test_portfolio_optimization_full.py)",
+      "Bash(timeout 600 python scripts/test_portfolio_optimization_pilot.py)",
+      "Bash(timeout 180 python scripts/test_portfolio_optimization_pilot.py)",
+      "Bash(timeout 1800 python scripts/test_portfolio_optimization_full.py)",
+      "Bash(timeout 600 python scripts/test_cvxpy_optimizer.py)",
+      "Bash(timeout 600 python scripts/calibrate_cvxpy_penalties.py)",
+      "Bash(timeout 600 python scripts/test_portfolio_optimization_753_cvxpy.py)",
+      "Bash(timeout 600 python scripts/test_cvxpy_complete_suite.py)",
+      "Bash(timeout 1800 python scripts/backtest_1m_portfolio.py)",
+      "Bash(timeout 1800 python scripts/backtest_weekly_momentum.py)",
+      "Bash(chmod:*)",
+      "Bash(awk:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

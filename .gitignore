@@ -1,0 +1,87 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb_checkpoints/
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Data files (keep structure but not large data)
+data/raw/*.csv
+data/raw/prices/*.csv
+data/processed/*.csv
+data/indicators/*.csv
+data/signals/*.csv
+
+# Keep directory structure
+!data/raw/.gitkeep
+!data/raw/prices/.gitkeep
+!data/processed/.gitkeep
+!data/indicators/.gitkeep
+!data/signals/.gitkeep
+
+# Results
+results/*.csv
+results/*.json
+results/*.html
+results/*.pdf
+
+# Logs
+logs/*.log
+*.log
+
+# Environment variables
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~

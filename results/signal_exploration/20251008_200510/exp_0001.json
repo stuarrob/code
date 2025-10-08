@@ -1,0 +1,46 @@
+{
+  "exp_id": 1,
+  "params": {
+    "exp_id": 1,
+    "combo": {
+      "name": "momentum_only",
+      "families": [
+        "momentum"
+      ]
+    },
+    "combo_name": "momentum_only",
+    "weighting": "equal",
+    "method": "weighted",
+    "turnover_penalty": 20.0,
+    "rebalance": "weekly"
+  },
+  "signal_config": {
+    "num_indicators": 4,
+    "indicators": [
+      "momentum_20",
+      "momentum_63",
+      "momentum_126",
+      "momentum_252"
+    ],
+    "method": "weighted"
+  },
+  "performance": {
+    "cagr": -0.049732742033775756,
+    "sharpe": -0.8259117185772056,
+    "sortino": -1.1746515764588967,
+    "calmar": -0.2722487371367985,
+    "max_drawdown": -0.1826739126756215,
+    "volatility": 0.10368178031215725,
+    "win_rate": 0.500998003992016
+  },
+  "turnover": {
+    "avg_turnover_pct": 1.3396242223160728,
+    "num_rebalances": 104
+  },
+  "signal_quality": {
+    "stability": 0.9411602928648675,
+    "avg_signal": 0.0,
+    "signal_range": 0.0
+  },
+  "success": true
+}
