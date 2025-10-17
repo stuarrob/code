@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: etftrader-postgres
+    environment:
+      POSTGRES_USER: etftrader
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: etftrader
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U etftrader"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: etftrader-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # FastAPI Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: etftrader-backend
+    environment:
+      DATABASE_URL: postgresql+asyncpg://etftrader:password@postgres:5432/etftrader
+      DATABASE_URL_SYNC: postgresql://etftrader:password@postgres:5432/etftrader
+      REDIS_URL: redis://redis:6379/0
+      DEBUG: "True"
+      DATA_DIR: "/app/data"
+      RESULTS_DIR: "/app/results"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - ./data:/app/data
+      - ./results:/app/results
+      - ./src:/app/src  # Mount existing Python code
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  postgres_data:
+  redis_data:

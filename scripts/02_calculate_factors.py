@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 def load_etf_data():
     """Load ETF price data."""
-    data_file = project_root / "data" / "etf_universe.parquet"
+    data_file = project_root / "data" / "processed" / "etf_prices_filtered.parquet"
 
     if not data_file.exists():
         raise FileNotFoundError(
