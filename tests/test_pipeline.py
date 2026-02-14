@@ -236,7 +236,7 @@ def test_trailing_stop_in_execute_script():
 
 def test_trailing_stop_in_notebook():
     """Notebook Section 8 must place trailing stop on every BUY."""
-    nb_path = PROJECT_ROOT / "notebooks" / "08_full_pipeline.ipynb"
+    nb_path = PROJECT_ROOT / "notebooks" / "reference" / "08_full_pipeline.ipynb"
     nb_text = nb_path.read_text()
 
     # .ipynb JSON escapes quotes, so check for the key identifiers
@@ -269,9 +269,9 @@ def test_trailing_stop_in_ib_execute():
 
 def test_cached_data_exists():
     """At least some cached IB data should exist."""
-    ib_cache = PROJECT_ROOT / "data" / "ib_historical"
+    ib_cache = Path.home() / "trade_data" / "ETFTrader" / "ib_historical"
     if not ib_cache.exists():
-        pytest.skip("IB cache directory not found (data may have been moved)")
+        pytest.skip("IB cache directory not found")
 
     parquets = list(ib_cache.glob("*.parquet"))
     parquets = [f for f in parquets if f.stem != "manifest"]

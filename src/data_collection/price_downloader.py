@@ -15,7 +15,7 @@ import os
 class PriceDownloader:
     """Download and manage OHLCV price data for ETFs"""
 
-    def __init__(self, data_dir: str = "data/raw/prices"):
+    def __init__(self, data_dir: str = str(Path.home() / "trade_data" / "ETFTrader" / "raw" / "prices")):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.fundamentals_data = []
@@ -177,7 +177,7 @@ class PriceDownloader:
 
         # Save fundamentals data
         fundamentals_df = pd.DataFrame(self.fundamentals_data)
-        fundamentals_path = "data/raw/fundamentals.csv"
+        fundamentals_path = str(Path.home() / "trade_data" / "ETFTrader" / "raw" / "fundamentals.csv")
         fundamentals_df.to_csv(fundamentals_path, index=False)
         print(f"\n💾 Saved fundamentals data to: {fundamentals_path}")
 
@@ -262,7 +262,7 @@ def main():
     downloader = PriceDownloader()
 
     # Download data for ETF universe
-    universe_file = "data/raw/etf_universe.csv"
+    universe_file = str(Path.home() / "trade_data" / "ETFTrader" / "raw" / "etf_universe.csv")
 
     if not os.path.exists(universe_file):
         print(f"❌ Universe file not found: {universe_file}")
@@ -277,7 +277,7 @@ def main():
     )
 
     # Save results summary
-    results_path = "data/raw/download_results.csv"
+    results_path = str(Path.home() / "trade_data" / "ETFTrader" / "raw" / "download_results.csv")
     results.to_csv(results_path, index=False)
     print(f"\n💾 Saved download results to: {results_path}")
 

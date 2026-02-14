@@ -16,8 +16,8 @@ class DataValidator:
 
     def __init__(
         self,
-        prices_dir: str = "data/raw/prices",
-        fundamentals_file: str = "data/raw/fundamentals.csv",
+        prices_dir: str = str(Path.home() / "trade_data" / "ETFTrader" / "raw" / "prices"),
+        fundamentals_file: str = str(Path.home() / "trade_data" / "ETFTrader" / "raw" / "fundamentals.csv"),
     ):
         self.prices_dir = Path(prices_dir)
         self.fundamentals_file = fundamentals_file
@@ -123,7 +123,7 @@ class DataValidator:
             }
 
     def validate_universe(
-        self, universe_file: str = "data/raw/etf_universe.csv"
+        self, universe_file: str = str(Path.home() / "trade_data" / "ETFTrader" / "raw" / "etf_universe.csv")
     ) -> pd.DataFrame:
         """
         Validate all ETFs in the universe

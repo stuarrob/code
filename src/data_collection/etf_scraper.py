@@ -656,7 +656,7 @@ def main():
     etf_universe = scraper.scrape_full_universe(max_etfs=300)
 
     # Save to CSV
-    output_path = "data/raw/etf_universe.csv"
+    output_path = str(Path.home() / "trade_data" / "ETFTrader" / "raw" / "etf_universe.csv")
     etf_universe.to_csv(output_path, index=False)
     print(f"\n✅ Saved ETF universe to: {output_path}")
     print(f"   Total ETFs: {len(etf_universe)}")

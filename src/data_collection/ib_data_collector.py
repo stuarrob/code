@@ -12,7 +12,7 @@ Usage:
     ib = IB()
     ib.connect("127.0.0.1", 4001, clientId=5, readonly=True)
 
-    collector = IBDataCollector(ib, cache_dir="data/ib_historical")
+    collector = IBDataCollector(ib)
 
     # Smart collection (skips current, increments stale, full-downloads new):
     prices_df, results_df = collector.collect_universe(tickers)
@@ -39,7 +39,7 @@ class IBDataCollector:
     def __init__(
         self,
         ib: IB,
-        cache_dir: str = "data/ib_historical",
+        cache_dir: str = str(Path.home() / "trade_data" / "ETFTrader" / "ib_historical"),
         rate_limit_interval: float = 12.0,
         duration: str = "5 Y",
         bar_size: str = "1 day",
@@ -692,7 +692,7 @@ class IBDataCollector:
 def collect_with_fallback(
     tickers: List[str],
     ib: Optional[IB] = None,
-    cache_dir: str = "data/ib_historical",
+    cache_dir: str = str(Path.home() / "trade_data" / "ETFTrader" / "ib_historical"),
     yf_fallback: bool = True,
 ) -> pd.DataFrame:
     """Try IB first, fall back to yfinance.

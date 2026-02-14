@@ -1128,7 +1128,7 @@ def load_full_universe(nasdaq_file=None):
     ----------
     nasdaq_file : str or Path, optional
         Path to nasdaq_etf_universe.txt.  Defaults to
-        data/raw/nasdaq_etf_universe.txt relative to the project root.
+        ~/trade_data/ETFTrader/raw/nasdaq_etf_universe.txt.
 
     Returns
     -------
@@ -1150,12 +1150,8 @@ def load_full_universe(nasdaq_file=None):
 
     # Locate NASDAQ file
     if nasdaq_file is None:
-        # Try common locations relative to this file and project root
-        here = _Path(__file__).resolve().parent
         candidates = [
-            here.parent.parent / "data" / "raw" / "nasdaq_etf_universe.txt",
-            _Path.cwd() / "data" / "raw" / "nasdaq_etf_universe.txt",
-            _Path.cwd().parent / "data" / "raw" / "nasdaq_etf_universe.txt",
+            _Path.home() / "trade_data" / "ETFTrader" / "raw" / "nasdaq_etf_universe.txt",
         ]
         for c in candidates:
             if c.exists():

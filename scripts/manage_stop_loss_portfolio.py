@@ -52,7 +52,7 @@ from src.factors import (
 )
 
 # Constants
-DATA_DIR = PROJECT_ROOT / "data"
+DATA_DIR = Path.home() / "trade_data" / "ETFTrader"
 RESULTS_DIR = Path.home() / "trading"
 PAPER_TRADING_FILE = RESULTS_DIR / "paper_trading" / "stop_loss_march_oct_2025.xlsx"
 

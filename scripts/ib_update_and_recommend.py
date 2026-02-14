@@ -27,7 +27,7 @@ nest_asyncio.apply()
 
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
-DATA_DIR = PROJECT_ROOT / "data"
+DATA_DIR = Path.home() / "trade_data" / "ETFTrader"
 TRADING_DIR = Path.home() / "trading"
 LIVE_DIR = TRADING_DIR / "live_portfolio"
 SNAPSHOT_DIR = LIVE_DIR / "snapshots"
