@@ -10,11 +10,14 @@ from pathlib import Path
 from datetime import datetime
 
 
+LOG_DIR = Path.home() / "logs" / "ETFTrader"
+
+
 def setup_logging(
     name: str = "etf_strategy",
     level: int = logging.INFO,
     log_to_file: bool = True,
-    log_dir: str = "logs"
+    log_dir: str = str(LOG_DIR),
 ) -> logging.Logger:
     """
     Setup logging with consistent format.
