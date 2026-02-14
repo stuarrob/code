@@ -357,7 +357,7 @@ def main():
     display_results(results, benchmark)
 
     # Save results
-    output_dir = project_root / "results" / "backtest_1m"
+    output_dir = Path.home() / "trading" / "backtest_1m"
     save_results(results, output_dir)
 
     logger.info(f"\n{'='*60}")

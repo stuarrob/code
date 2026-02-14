@@ -273,6 +273,9 @@ class BacktestEngine:
             return (current_date - last_rebalance).days >= 7
         elif self.config.rebalance_frequency == 'monthly':
             return current_date.month != last_rebalance.month or current_date.year != last_rebalance.year
+        elif self.config.rebalance_frequency == 'bimonthly':
+            # Every 2 months = 6 rebalances per year
+            return (current_date - last_rebalance).days >= 60
         elif self.config.rebalance_frequency == 'quarterly':
             curr_quarter = (current_date.month - 1) // 3
             last_quarter = (last_rebalance.month - 1) // 3

@@ -1,5 +1,7 @@
 """Application configuration."""
 
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List
 
@@ -25,7 +27,7 @@ class Settings(BaseSettings):
 
     # Data Paths (relative paths work in Docker /app)
     DATA_DIR: str = "data"
-    RESULTS_DIR: str = "results"
+    RESULTS_DIR: str = str(Path.home() / "trading")
 
     # Paper Trading
     DEFAULT_COMMISSION: float = 1.0
@@ -39,6 +41,16 @@ class Settings(BaseSettings):
     DEFAULT_NUM_POSITIONS: int = 20
     DEFAULT_DRIFT_THRESHOLD: float = 0.05
     DEFAULT_OPTIMIZER: str = "mvo"
+
+    # Interactive Brokers Gateway
+    IB_HOST: str = "127.0.0.1"
+    IB_PORT: int = 4002  # 4002 = paper trading, 4001 = live
+    IB_CLIENT_ID: int = 1
+    IB_TIMEOUT: int = 10  # Connection timeout in seconds
+    IB_READONLY: bool = True  # Read-only mode (no order execution)
+    IB_ENABLED: bool = False  # Master switch: set True to enable IB connectivity
+    IB_RECONNECT_INTERVAL: int = 30  # Seconds between reconnection attempts
+    IB_ACCOUNT: str = ""  # IB account ID (blank = auto-detect first account)
 
     # Authentication (Phase 2)
     # SECRET_KEY: str = "your-secret-key-here"

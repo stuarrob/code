@@ -11,8 +11,12 @@ Reference: "Fact, Fiction and Momentum Investing" - AQR (2014)
 
 import pandas as pd
 import numpy as np
-from src.factors.base_factor import BaseFactor
-from src.utils.logging_config import get_logger
+from .base_factor import BaseFactor
+try:
+    from src.utils.logging_config import get_logger
+except ModuleNotFoundError:
+    import logging
+    get_logger = logging.getLogger
 
 logger = get_logger(__name__)
 

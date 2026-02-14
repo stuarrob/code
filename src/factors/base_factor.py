@@ -8,7 +8,11 @@ from abc import ABC, abstractmethod
 import pandas as pd
 import numpy as np
 from typing import Optional
-from src.utils.logging_config import get_logger
+try:
+    from src.utils.logging_config import get_logger
+except ModuleNotFoundError:
+    import logging
+    get_logger = logging.getLogger
 
 logger = get_logger(__name__)
 

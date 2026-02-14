@@ -8,24 +8,38 @@
 \usepackage{listings}
 \usepackage{xcolor}
 \usepackage{float}
+\usepackage{enumitem}
 
 \geometry{margin=1in}
 
-\title{\textbf{AQR Multi-Factor ETF Investment Strategy}\\
-\large Technical Documentation and Performance Validation}
+\title{\textbf{Multi-Factor ETF Strategy with Stop-Loss Protection}\\
+\large Technical Investment Document}
 
-\author{Quantitative Portfolio Management System\\
-Real Data Validation: October 2020 - October 2025}
+\author{Quantitative Portfolio Management\\
+Validated Performance: March - October 2025}
 
-\date{\today}
+\date{October 31, 2025 \\ Version 2.0}
 
 \hypersetup{
     colorlinks=true,
     linkcolor=blue,
     filecolor=magenta,
     urlcolor=cyan,
-    pdftitle={AQR Multi-Factor ETF Strategy},
+    pdftitle={Stop-Loss ETF Strategy},
     pdfpagemode=FullScreen,
+}
+
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    commentstyle=\color{gray},
+    stringstyle=\color{red},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    breaklines=true,
+    frame=single,
+    captionpos=b
 }
 
 \begin{document}
@@ -33,7 +47,7 @@ Real Data Validation: October 2020 - October 2025}
 \maketitle
 
 \begin{abstract}
-This document presents a comprehensive multi-factor ETF investment strategy inspired by AQR Capital Management research. The strategy has been rigorously validated on 5 years of real market data (October 2020 - October 2025) across 623 exchange-traded funds. Our validation demonstrates consistent outperformance with a 17.0\% compound annual growth rate (CAGR), Sharpe ratio of 1.07, and maximum drawdown of -15.7\%, significantly exceeding initial targets. The strategy employs geometric mean factor integration, mean-variance optimization with Axioma risk adjustment, and VIX-based dynamic risk management. All components have been tested across three distinct market regimes: bull markets, bear/volatile markets, and recovery periods, with a 100\% success rate on drawdown control targets.
+This document specifies a systematic quantitative investment strategy combining multi-factor ETF selection with disciplined stop-loss risk management. The strategy employs four equal-weighted factors (Momentum, Quality, Value, Volatility) to select 20 ETF positions, with -12\% entry stop-losses and -8\% trailing stops for capital protection. Validated on 7 months of real market data (March-October 2025), the strategy achieved 9.63\% CAGR with 0.83 Sharpe ratio and only 3 stop-loss triggers. Capital deployment follows a gradual schedule: \$100k immediate deployment with \$70k deployed from fixed income reserves over 7 months, followed by \$5k monthly contributions. The strategy achieves 82\% reduction in turnover compared to weekly rebalancing while maintaining strong risk-adjusted returns.
 \end{abstract}
 
 \newpage
@@ -42,670 +56,736 @@ This document presents a comprehensive multi-factor ETF investment strategy insp
 
 \section{Executive Summary}
 
-\subsection{Strategy Overview}
+\subsection{Investment Philosophy}
 
-The AQR Multi-Factor ETF Strategy is a quantitative investment approach that systematically identifies and invests in exchange-traded funds exhibiting strong characteristics across multiple proven factors. Unlike traditional single-factor strategies, our approach requires ETFs to demonstrate strength across ALL factors simultaneously, leading to more robust portfolio construction.
+The strategy is based on a simple but powerful principle: \textbf{``Let Winners Run, Cut Losers Quickly''}. Rather than forcing periodic rebalancing, positions are held indefinitely as long as they perform, and sold only when stop-losses trigger at -12\% from entry price.
 
-\subsection{Key Performance Results}
-
-Validation on real market data (October 2020 - October 2025) yielded exceptional results:
+\subsection{Capital Structure}
 
 \begin{table}[H]
 \centering
-\begin{tabular}{lrrr}
+\begin{tabular}{lrl}
 \toprule
-\textbf{Metric} & \textbf{Target} & \textbf{Achieved} & \textbf{vs Target} \\
+\textbf{Component} & \textbf{Amount} & \textbf{Purpose} \\
 \midrule
-CAGR & $>12\%$ & $17.0\%$ & $+5.0\%$ \\
-Sharpe Ratio & $>0.8$ & $1.07$ & $+0.27$ \\
-Maximum Drawdown & $<-25\%$ & $-15.7\%$ & $+9.3\%$ \\
-Annual Rebalances & $<24$ & $2.4$ & $89.9\%$ better \\
+Initial Capital & \$170,000 & Total starting capital \\
+Immediate Deployment & \$100,000 & 20 ETF positions @ \$5,000 each \\
+Cash Reserve (SGOV) & \$70,000 & Deploy \$10k/month for 7 months \\
+Monthly Contributions & \$5,000 & Begin Month 8 (November 2025) \\
 \bottomrule
 \end{tabular}
-\caption{Performance vs Initial Targets}
+\caption{Capital Allocation Structure}
 \end{table}
 
-\subsection{Validation Scope}
+\subsection{Validated Performance Metrics}
 
-\begin{itemize}
-    \item \textbf{Universe}: 623 ETFs (filtered from 753 for data quality)
-    \item \textbf{Period}: 1,256 trading days (October 5, 2020 - October 3, 2025)
-    \item \textbf{Scenarios}: 12 (4 optimizers $\times$ 3 market periods)
-    \item \textbf{Market Regimes Tested}:
-    \begin{itemize}
-        \item Period 1 (2020-2021): Bull market / COVID recovery
-        \item Period 2 (2022-2023): Bear market / Inflation crisis
-        \item Period 3 (2024-2025): Recovery / AI boom
-    \end{itemize}
-\end{itemize}
+Backtest period: March 3 - October 13, 2025 (33 weeks)
 
-\section{Theoretical Foundation}
+\begin{table}[H]
+\centering
+\begin{tabular}{lrr}
+\toprule
+\textbf{Metric} & \textbf{Result} & \textbf{Status} \\
+\midrule
+Total Return (7 months) & +5.77\% & \checkmark \\
+CAGR & 9.63\% & \checkmark \\
+Sharpe Ratio & 0.83 & \checkmark \\
+Maximum Drawdown & -7.95\% & \checkmark \\
+Stop-Losses Triggered & 3 in 33 weeks & \checkmark \\
+Average Weekly Turnover & ~8\% & \checkmark Excellent \\
+Total Trades & 26 (vs 148 baseline) & \checkmark 82\% reduction \\
+\bottomrule
+\end{tabular}
+\caption{Validated Performance Results}
+\end{table}
 
-\subsection{Factor Investing Framework}
+\section{Factor Framework}
 
-Factor investing is grounded in decades of academic research demonstrating that certain characteristics (factors) of securities explain a significant portion of their returns. Our strategy builds on four well-established factors:
+\subsection{Factor Definitions}
+
+The strategy employs four factors, each contributing 25\% to the integrated score:
 
 \subsubsection{Momentum Factor}
 
-The momentum effect, documented by Jegadeesh and Titman (1993), shows that securities with strong past performance tend to continue outperforming. We implement a 12-month momentum signal with a 1-month lag to avoid short-term reversals:
-
+\textbf{Calculation:}
 \begin{equation}
-\text{Momentum}_{i,t} = \frac{P_{i,t} - P_{i,t-252}}{P_{i,t-252}} \quad \text{where } t-21 < \text{evaluation date}
+\text{Momentum}_i = \frac{P_{i,t} - P_{i,t-252}}{P_{i,t-252}}
 \end{equation}
 
-where:
-\begin{itemize}
-    \item $P_{i,t}$ is the price of ETF $i$ at time $t$
-    \item 252 trading days $\approx$ 1 year lookback
-    \item 21 trading days $\approx$ 1 month skipped to avoid reversal
+Where:
+\begin{itemize}[noitemsep]
+    \item $P_{i,t}$ = current price of ETF $i$
+    \item $P_{i,t-252}$ = price 252 trading days ago ($\approx$ 1 year)
+    \item Skip most recent 21 days to avoid short-term reversal
+    \item Winsorize at 1st/99th percentile
 \end{itemize}
+
+\textbf{Purpose:} Capture trending ETFs with strong 12-month performance
+
+\textbf{Academic Basis:} Jegadeesh \& Titman (1993) momentum anomaly
 
 \subsubsection{Quality Factor}
 
-Quality captures the stability and consistency of returns. We measure quality through risk-adjusted performance metrics:
+\textbf{Components:}
+\begin{align}
+\text{Sharpe Ratio} &= \frac{\mu_r}{\sigma_r} \sqrt{252} \\
+\text{Sortino Ratio} &= \frac{\mu_r}{\text{DD}(r)} \sqrt{252} \\
+\text{Max Drawdown} &= \min\left(\frac{P_t - \text{Peak}_t}{\text{Peak}_t}\right)
+\end{align}
 
-\begin{equation}
-\text{Quality}_{i,t} = \frac{1}{3}\left(\text{Sharpe}_{i,t} + \text{Stability}_{i,t} - \text{MaxDD}_{i,t}\right)
-\end{equation}
+Where $\mu_r$ is mean daily return, $\sigma_r$ is standard deviation, and DD$(r)$ is downside deviation.
 
-where:
+\textbf{Purpose:} Select ETFs with consistent risk-adjusted performance
 
-\begin{equation}
-\text{Sharpe}_{i,t} = \frac{\bar{r}_{i,t} - r_f}{\sigma_{r,i,t}} \sqrt{252}
-\end{equation}
-
-\begin{equation}
-\text{Stability}_{i,t} = -\text{CV}_{r,i,t} = -\frac{\sigma_{r,i,t}}{|\bar{r}_{i,t}|}
-\end{equation}
-
-\begin{equation}
-\text{MaxDD}_{i,t} = \min_{s \leq t} \left(\frac{P_{i,s} - \max_{u \leq s} P_{i,u}}{\max_{u \leq s} P_{i,u}}\right)
-\end{equation}
+\textbf{Academic Basis:} Asness, Frazzini, Pedersen (2019) quality investing
 
 \subsubsection{Value Factor}
 
-For ETFs, traditional valuation metrics (P/E, P/B) are less applicable. We proxy value through expense ratio, where lower costs translate to higher investor returns:
-
+\textbf{Calculation:}
 \begin{equation}
-\text{Value}_{i,t} = -\log\left(\frac{\text{ExpenseRatio}_i}{0.01}\right)
+\text{Value}_i = -1 \times \text{Expense Ratio}_i
 \end{equation}
 
-This logarithmic transformation ensures that differences in low expense ratios (0.03\% vs 0.05\%) receive appropriate weight.
+\textbf{Rationale:} Expense ratios represent permanent drag on returns. Lower cost ETFs provide better value.
 
-\subsubsection{Low Volatility Factor}
+\subsubsection{Volatility Factor}
 
-The low volatility anomaly (Ang et al., 2006) shows that lower-risk assets often generate higher risk-adjusted returns than predicted by CAPM:
-
+\textbf{Calculation:}
 \begin{equation}
-\text{Volatility}_{i,t} = -\sigma_{r,i,t} \sqrt{252}
+\text{Volatility}_i = \frac{1}{\sigma_{60d,i} \times \sqrt{252}}
 \end{equation}
 
-where $\sigma_{r,i,t}$ is the standard deviation of daily returns over 60 trading days, annualized.
+Where $\sigma_{60d,i}$ is the standard deviation of daily returns over 60 trading days.
 
-\subsection{Factor Integration: Geometric Mean Approach}
+\textbf{Purpose:} Favor stable ETFs, reduce portfolio volatility
 
-Traditional factor models often combine factors through addition or weighted averages. Following AQR research, we use geometric mean integration, which requires consistency across ALL factors:
+\textbf{Academic Basis:} Baker, Bradley, Wurgler (2011) low volatility anomaly
+
+\subsection{Factor Integration}
+
+Factors are combined using \textbf{equal-weight geometric mean}:
 
 \begin{equation}
-\text{CombinedScore}_i = \exp\left(\sum_{j=1}^{4} w_j \log(z_{ij} + c)\right) - c
+\text{Score}_i = \left(\text{Mom}_i \times \text{Qual}_i \times \text{Val}_i \times \text{Vol}_i\right)^{1/4}
 \end{equation}
 
-where:
-\begin{itemize}
-    \item $z_{ij}$ is the z-score of factor $j$ for ETF $i$
-    \item $w_j$ are factor weights ($\sum w_j = 1$, we use $w_j = 0.25$ for equal weighting)
-    \item $c$ is a constant shift to ensure positivity (we use $c = 3$)
-\end{itemize}
+All factors are normalized to [0,1] before integration. ETFs are ranked by integrated score, and top 20 are selected for the portfolio.
 
-The key advantage of geometric mean: if any factor is weak (low z-score), the combined score is substantially reduced, ensuring multi-factor consistency.
+\textbf{Recalculation Frequency:} Bi-weekly (every 2 weeks)
 
 \section{Portfolio Construction}
 
-\subsection{Mean-Variance Optimization with Axioma Adjustment}
+\subsection{Position Sizing}
 
-We employ mean-variance optimization as formulated by Markowitz (1952), with a critical enhancement: the Axioma risk adjustment for robustness under uncertain returns.
+\textbf{Target:} 20 equal-weight positions
 
-\subsubsection{Standard Mean-Variance Formulation}
+\textbf{Initial Size:} \$5,000 per position (\$100,000 / 20)
 
-The classical mean-variance optimization problem:
-
-\begin{equation}
-\begin{aligned}
-\max_{w} \quad & \alpha' w - \frac{\lambda}{2} w' \Sigma w \\
-\text{s.t.} \quad & \sum_{i=1}^{N} w_i = 1 \\
-& w_i \geq 0 \quad \forall i \\
-& \text{(optional constraints)}
-\end{aligned}
-\end{equation}
-
-where:
+\textbf{As Capital Grows:}
 \begin{itemize}
-    \item $w \in \mathbb{R}^N$ is the weight vector
-    \item $\alpha \in \mathbb{R}^N$ are expected returns (derived from factor scores)
-    \item $\Sigma \in \mathbb{R}^{N \times N}$ is the covariance matrix (estimated from 60-day returns)
-    \item $\lambda$ is the risk aversion parameter (we use $\lambda = 1.0$)
+    \item Month 7 (October 2025): \$8,500 per position
+    \item Month 13 (May 2026): \$10,250 per position
 \end{itemize}
 
-\subsubsection{Axioma Risk Adjustment}
-
-The Axioma adjustment adds a term $w'\Sigma w$ to the expected return, making the optimization robust to errors in $\alpha$:
-
-\begin{equation}
-\tilde{\alpha}_i = \alpha_i + \gamma \cdot (\Sigma w)_i
-\end{equation}
-
-Leading to the modified objective:
-
-\begin{equation}
-\begin{aligned}
-\max_{w} \quad & \alpha' w + \gamma w' \Sigma w - \frac{\lambda}{2} w' \Sigma w \\
-= & \alpha' w + \left(\gamma - \frac{\lambda}{2}\right) w' \Sigma w
-\end{aligned}
-\end{equation}
-
-With $\gamma = 0.01$ (Axioma penalty) and $\lambda = 1.0$ (risk aversion), this creates a more diversified portfolio that doesn't over-concentrate in high-expected-return assets.
-
-\subsection{Transaction Cost Model}
-
-Realistic transaction cost modeling is critical for accurate performance assessment. Our model incorporates three components:
-
-\begin{equation}
-\text{TotalCost} = \text{Commission} + \text{Spread} + \text{Slippage}
-\end{equation}
-
-\begin{equation}
-\begin{aligned}
-\text{Commission} &= n_{\text{trades}} \times \$0 \quad \text{(zero-commission brokers)} \\
-\text{Spread} &= \sum_{i} |w_i^{\text{new}} - w_i^{\text{old}}| \times V \times 0.0002 \\
-\text{Slippage} &= \sum_{i} |w_i^{\text{new}} - w_i^{\text{old}}| \times V \times 0.0002
-\end{aligned}
-\end{equation}
-
-where $V$ is portfolio value. Combined, this yields approximately 4 basis points per rebalance.
-
-\subsection{Risk Management}
-
-\subsubsection{VIX-Based Dynamic Stop-Loss}
-
-Traditional fixed stop-losses can be too tight in calm markets (premature exits) or too loose in volatile markets. We implement a VIX-adjusted stop-loss:
-
-\begin{equation}
-\text{StopLoss}_t = \begin{cases}
-15\% & \text{if } \text{VIX}_t < 15 \quad \text{(low volatility)} \\
-12\% & \text{if } 15 \leq \text{VIX}_t \leq 25 \quad \text{(normal)} \\
-10\% & \text{if } \text{VIX}_t > 25 \quad \text{(high volatility)}
-\end{cases}
-\end{equation}
-
-This adaptive approach tightens protection during volatility spikes while allowing breathing room during stable periods.
-
-\subsubsection{Threshold-Based Rebalancing}
-
-Rather than calendar-based rebalancing, we use drift thresholds:
-
-\begin{equation}
-\text{Rebalance} = \begin{cases}
-\text{True} & \text{if } \max_i |w_i^{\text{current}} - w_i^{\text{target}}| > \delta \\
-\text{False} & \text{otherwise}
-\end{cases}
-\end{equation}
-
-where $\delta = 5\%$ for most optimizers, and $\delta = 7.5\%$ for minimum variance (to reduce excessive turnover).
-
-\section{Empirical Validation}
-
-\subsection{Data Description}
-
-\subsubsection{Universe Construction}
-
-Starting universe: 753 ETFs collected via yfinance API
-
-Quality filters applied:
-\begin{itemize}
-    \item Minimum price: \$10 (exclude penny-stock-like ETFs)
-    \item Maximum volatility: 35\% annualized (exclude leveraged/exotic products)
-    \item Maximum missing data: 10\% (ensure data reliability)
-    \item Minimum history: 252 days (required for momentum calculation)
-\end{itemize}
-
-\textbf{Final universe}: 623 ETFs (82.7\% retention rate)
-
-\subsubsection{Period Definitions}
-
-Three periods chosen to represent distinct market regimes:
-
-\begin{table}[H]
-\centering
-\begin{tabular}{llrrl}
-\toprule
-\textbf{Period} & \textbf{Dates} & \textbf{Days} & \textbf{Regime} & \textbf{Characteristics} \\
-\midrule
-1 & Oct 2020 - Dec 2021 & 314 & Bull & COVID recovery, stimulus \\
-2 & Jan 2022 - Dec 2023 & 501 & Bear/Volatile & Inflation, rate hikes \\
-3 & Jan 2024 - Oct 2025 & 441 & Recovery & Stabilization, AI boom \\
-\midrule
-\textbf{Total} & Oct 2020 - Oct 2025 & 1256 & \multicolumn{2}{l}{5 years, 3 regimes} \\
-\bottomrule
-\end{tabular}
-\caption{Validation Periods}
-\end{table}
-
-\subsection{Optimizer Comparison}
-
-Four portfolio construction approaches tested:
+\subsection{Selection Process}
 
 \begin{enumerate}
-    \item \textbf{Simple}: Equal-weight top 20 ETFs by combined factor score
-    \item \textbf{RankBased}: Linearly weighted by factor score rank
-    \item \textbf{MinVar}: Minimum variance with Axioma adjustment
-    \item \textbf{MVO}: Mean-variance optimization with Axioma adjustment (recommended)
+    \item Calculate factors for all 623 ETFs using historical data
+    \item Integrate factors into single score per ETF
+    \item Rank ETFs by integrated score (descending)
+    \item Select top 20 ETFs
+    \item Equal-weight positions at $\approx$5\% each
 \end{enumerate}
 
-\subsection{Performance Results by Period}
+\subsection{Rebalancing Rules}
 
-\subsubsection{Period 1: Bull Market (2020-2021)}
+\textbf{Factor Recalculation:} Every 2 weeks (Monday of weeks 1, 3, 5, etc.)
 
-All optimizers performed exceptionally well:
+\textbf{Position Entry:}
+\begin{itemize}
+    \item Fill empty slots (from stop-losses) with top-ranked ETFs
+    \item Buy when cash available and slot open
+    \item Set entry price and stop-loss immediately
+\end{itemize}
 
-\begin{table}[H]
-\centering
-\begin{tabular}{lrrrr}
-\toprule
-\textbf{Optimizer} & \textbf{Total Return} & \textbf{CAGR} & \textbf{Sharpe} & \textbf{Max DD} \\
-\midrule
-MVO & 35.9\% & 28.2\% & 1.84 & -6.7\% \\
-RankBased & 35.2\% & 27.7\% & 1.80 & -6.9\% \\
-Simple & 34.3\% & 27.0\% & 1.78 & -6.7\% \\
-MinVar & 20.0\% & 15.9\% & 1.42 & -6.7\% \\
-\bottomrule
-\end{tabular}
-\caption{Period 1 Performance: All Optimizers Succeeded}
-\end{table}
+\textbf{Position Exit:}
+\begin{itemize}
+    \item ONLY when stop-loss triggers (-12\% from entry)
+    \item OR when trailing stop triggers (-8\% from peak for winners)
+    \item NEVER sell winners that haven't triggered stops
+\end{itemize}
 
-\textbf{Key Observation}: In favorable market conditions, optimizer choice matters less. All approaches delivered strong returns with minimal drawdowns.
+\textbf{No Forced Selling:} Unlike traditional rebalancing, positions are held indefinitely if performing well.
 
-\subsubsection{Period 2: Bear/Volatile Market (2022-2023)}
+\section{Risk Management Framework}
 
-This period separated robust strategies from fragile ones:
+\subsection{Stop-Loss Rules}
 
-\begin{table}[H]
-\centering
-\begin{tabular}{lrrrr}
-\toprule
-\textbf{Optimizer} & \textbf{Total Return} & \textbf{CAGR} & \textbf{Sharpe} & \textbf{Max DD} \\
-\midrule
-RankBased & +0.5\% & +0.3\% & -0.02 & -25.2\% \\
-MVO & -0.5\% & -0.2\% & -0.05 & -26.7\% \\
-MinVar & -8.5\% & -4.4\% & -0.51 & -24.8\% \\
-Simple & -12.8\% & -6.7\% & -1.84 & -12.8\% \\
-\bottomrule
-\end{tabular}
-\caption{Period 2 Performance: MVO and RankBased Near Breakeven}
-\end{table}
+\subsubsection{Primary Stop: Entry Price Protection}
 
-\textbf{Critical Insight}: MVO and RankBased demonstrated resilience, staying near breakeven while others lost significant ground. All strategies maintained drawdowns $<$ 27\%, successfully avoiding disaster scenarios.
-
-\subsubsection{Period 3: Recovery (2024-2025)}
-
-Strong rebound across all approaches:
-
-\begin{table}[H]
-\centering
-\begin{tabular}{lrrrr}
-\toprule
-\textbf{Optimizer} & \textbf{Total Return} & \textbf{CAGR} & \textbf{Sharpe} & \textbf{Max DD} \\
-\midrule
-RankBased & 44.5\% & 23.5\% & 1.39 & -15.1\% \\
-Simple & 43.7\% & 23.0\% & 1.39 & -15.1\% \\
-MVO & 43.6\% & 23.0\% & 1.41 & -13.7\% \\
-MinVar & 30.1\% & 16.3\% & 1.51 & -8.8\% \\
-\bottomrule
-\end{tabular}
-\caption{Period 3 Performance: All Optimizers Rebounded Strongly}
-\end{table}
-
-\subsection{Aggregate Performance (All Periods)}
-
-Averaging across all three periods:
-
-\begin{table}[H]
-\centering
-\begin{tabular}{lrrrrr}
-\toprule
-\textbf{Optimizer} & \textbf{Avg CAGR} & \textbf{Avg Sharpe} & \textbf{Avg MaxDD} & \textbf{Rebalances} & \textbf{Costs} \\
-\midrule
-\textbf{MVO} & \textbf{17.0\%} & \textbf{1.07} & \textbf{-15.7\%} & \textbf{12} & \textbf{\$3,304} \\
-RankBased & 17.1\% & 1.06 & -15.7\% & 10 & \$1,810 \\
-MinVar & 9.3\% & 0.80 & -13.4\% & 101 & \$18,345 \\
-Simple & 14.5\% & 0.44 & -11.5\% & 3 & \$1,200 \\
-\bottomrule
-\end{tabular}
-\caption{5-Year Average Performance (Oct 2020 - Oct 2025)}
-\end{table}
-
-\subsection{Statistical Significance}
-
-To assess whether performance differences are statistically meaningful, we compute the information ratio:
-
+\textbf{Rule:}
 \begin{equation}
-\text{IR} = \frac{\bar{r}_{\text{strategy}} - \bar{r}_{\text{benchmark}}}{\sigma_{r_{\text{strategy}} - r_{\text{benchmark}}}}
+\text{If } P_{i,t} < P_{i,\text{entry}} \times 0.88 \text{ then SELL}
 \end{equation}
 
-Using Simple optimizer as benchmark:
+\textbf{Example:}
+\begin{itemize}
+    \item Entry price: \$100.00
+    \item Stop-loss trigger: \$88.00 (-12\%)
+    \item If price hits \$87.99, sell entire position
+\end{itemize}
 
-\begin{table}[H]
-\centering
-\begin{tabular}{lrrr}
-\toprule
-\textbf{Optimizer} & \textbf{Excess Return} & \textbf{Tracking Error} & \textbf{IR} \\
-\midrule
-MVO & +2.5\% & 3.2\% & 0.78 \\
-RankBased & +2.6\% & 2.9\% & 0.90 \\
-MinVar & -5.2\% & 4.1\% & -1.27 \\
-\bottomrule
-\end{tabular}
-\caption{Information Ratios vs Simple Optimizer}
-\end{table}
+\textbf{Rationale:}
+\begin{itemize}
+    \item Allows for normal ETF volatility (2-5\% daily swings)
+    \item Prevents catastrophic losses (max -12\% per position)
+    \item Based on academic research (15\% optimal, we use 12\% for safety)
+\end{itemize}
 
-RankBased and MVO show positive information ratios, indicating skilled active management. MinVar underperformed due to excessive transaction costs.
+\subsubsection{Trailing Stop: Profit Protection}
 
-\section{Risk Analysis}
-
-\subsection{Drawdown Analysis}
-
-Maximum drawdown is a critical risk metric. All strategies maintained drawdowns well below the -25\% target:
-
+\textbf{Activation Condition:}
 \begin{equation}
-\text{Drawdown}_t = \frac{V_t - \max_{s \leq t} V_s}{\max_{s \leq t} V_s}
+\text{Gain}_i = \frac{P_{i,t} - P_{i,\text{entry}}}{P_{i,\text{entry}}} > 0.10
 \end{equation}
 
-\textbf{Worst drawdowns observed}:
-\begin{itemize}
-    \item MVO: -26.7\% (Period 2, inflation crisis)
-    \item RankBased: -25.2\% (Period 2)
-    \item MinVar: -24.8\% (Period 2)
-    \item Simple: -12.8\% (Period 2, but also lowest returns)
-\end{itemize}
-
-\textbf{Achievement}: 100\% of scenarios (12/12) kept drawdown $<$ 27\%, demonstrating robust risk control.
-
-\subsection{Value at Risk (VaR)}
-
-We compute 95\% daily VaR for the MVO strategy:
-
+\textbf{Trailing Stop Rule:}
 \begin{equation}
-\text{VaR}_{0.95} = \bar{r} - 1.645 \times \sigma_r
+\text{If } P_{i,t} < P_{i,\text{peak}} \times 0.92 \text{ then SELL}
 \end{equation}
 
-Results:
+\textbf{Example:}
 \begin{itemize}
-    \item Period 1: VaR = -1.8\% (low risk, high returns)
-    \item Period 2: VaR = -2.4\% (elevated risk, near-zero returns)
-    \item Period 3: VaR = -2.1\% (moderate risk, strong returns)
+    \item Entry price: \$100.00
+    \item Peak price: \$120.00 (+20\% gain)
+    \item Trailing stop: \$110.40 (92\% of peak)
+    \item If price drops to \$110.39, sell position
 \end{itemize}
 
-\subsection{Conditional Value at Risk (CVaR)}
+\textbf{Rationale:}
+\begin{itemize}
+    \item Let winners run (no upside cap)
+    \item Protect against giving back too much profit
+    \item Only activates after +10\% gain threshold
+\end{itemize}
 
-CVaR measures expected loss in worst 5\% of days:
-
-\begin{equation}
-\text{CVaR}_{0.95} = \mathbb{E}[r | r < \text{VaR}_{0.95}]
-\end{equation}
-
-MVO CVaR: -2.9\% (acceptable tail risk)
-
-\section{Transaction Cost Impact}
-
-Transaction costs significantly impact net returns, especially for high-turnover strategies:
+\subsection{Position-Level Risk Controls}
 
 \begin{table}[H]
 \centering
-\begin{tabular}{lrrrr}
+\begin{tabular}{ll}
 \toprule
-\textbf{Optimizer} & \textbf{Gross CAGR} & \textbf{Total Costs} & \textbf{Annual Impact} & \textbf{Net CAGR} \\
+\textbf{Control} & \textbf{Limit} \\
 \midrule
-MVO & 17.0\% & \$3,304 & -0.07\%/yr & 16.9\% \\
-RankBased & 17.1\% & \$1,810 & -0.04\%/yr & 17.1\% \\
-MinVar & 9.3\% & \$18,345 & -0.37\%/yr & 8.9\% \\
-Simple & 14.5\% & \$1,200 & -0.02\%/yr & 14.5\% \\
+Maximum Loss Per Position & -12\% (enforced by stop-loss) \\
+Position Concentration & 5\% per position (equal-weight) \\
+Maximum Portfolio Loss & -12\% (if all 20 stop simultaneously) \\
+Typical Loss Scenario & -1.8\% (if 2-3 positions stop) \\
 \bottomrule
 \end{tabular}
-\caption{Transaction Cost Impact on \$1M Portfolio}
+\caption{Position-Level Risk Limits}
 \end{table}
 
-\textbf{Key Finding}: MinVar's excessive rebalancing (101 times over 5 years vs 12 for MVO) eroded 0.37\%/year from returns. This demonstrates why lower-turnover strategies (MVO, RankBased) are preferable.
-
-\section{Sensitivity Analysis}
-
-\subsection{Parameter Robustness}
-
-We test sensitivity to key parameters:
-
-\subsubsection{Risk Aversion ($\lambda$)}
+\subsection{Monitoring Requirements}
 
 \begin{table}[H]
 \centering
-\begin{tabular}{lrrr}
+\begin{tabular}{lll}
 \toprule
-\textbf{$\lambda$} & \textbf{CAGR} & \textbf{Sharpe} & \textbf{Max DD} \\
+\textbf{Frequency} & \textbf{Action} & \textbf{Time} \\
 \midrule
-0.5 & 18.2\% & 1.12 & -18.3\% \\
-1.0 (base) & 17.0\% & 1.07 & -15.7\% \\
-2.0 & 15.1\% & 0.98 & -12.4\% \\
+Daily & Update peak prices (automated) & 5 min \\
+Weekly & Check stop-losses & 30 min \\
+Bi-weekly & Recalculate factors, fill slots & 60 min \\
+Monthly & Add capital, review performance & 30 min \\
 \bottomrule
 \end{tabular}
-\caption{Sensitivity to Risk Aversion}
+\caption{Monitoring Schedule}
 \end{table}
 
-Higher risk aversion reduces returns but also reduces drawdowns. $\lambda = 1.0$ provides good balance.
+\section{Capital Deployment}
 
-\subsubsection{Number of Positions}
+\subsection{Initial Setup}
+
+\textbf{Total Capital:} \$170,000
+
+\textbf{Allocation Strategy:}
+\begin{table}[H]
+\centering
+\begin{tabular}{lrl}
+\toprule
+\textbf{Component} & \textbf{Amount} & \textbf{Purpose} \\
+\midrule
+Immediate Investment & \$100,000 & 20 positions @ \$5,000 each \\
+Cash Reserve & \$70,000 & Deploy gradually via SGOV \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Fixed Income Reserve: SGOV}
+
+\textbf{Recommendation:} iShares 0-3 Month Treasury Bond ETF (SGOV)
+
+\textbf{Characteristics:}
+\begin{itemize}[noitemsep]
+    \item Expense ratio: 0.07\%
+    \item Yield: ~5\% (varies with Fed rates)
+    \item Duration: 0.1 years (minimal interest rate risk)
+    \item Liquidity: High (tight bid-ask spreads)
+    \item Safety: US Treasury-backed
+\end{itemize}
+
+\textbf{Alternative:} SPDR Bloomberg 1-3 Month T-Bill ETF (BIL)
+
+\subsection{Deployment Schedule}
+
+\textbf{Month 1 (March 2025):}
+\begin{itemize}
+    \item Invest \$100k in top 20 ETFs (\$5,000 each)
+    \item Place \$70k in SGOV
+    \item NO monthly contributions yet
+\end{itemize}
+
+\textbf{Months 2-7 (April - October 2025):}
+\begin{itemize}
+    \item Each month: Withdraw \$10k from SGOV
+    \item Deploy into ETF positions as stops trigger or opportunities emerge
+    \item NO monthly contributions yet
+    \item By Month 7: Fully deployed (\$170k initial capital)
+\end{itemize}
+
+\textbf{Month 8+ (November 2025 onwards):}
+\begin{itemize}
+    \item SGOV reserve exhausted
+    \item START monthly contributions: \$5k/month
+    \item Deploy into empty slots (from stops) or increase existing positions
+    \item By Month 13 (May 2026): \$170k + \$30k contributions + gains = \$215k-\$235k
+\end{itemize}
+
+\subsection{Capital Deployment Formula}
+
+\begin{lstlisting}[caption={Capital Deployment Parameters}]
+# Starting capital (March 2025)
+total_capital = 170_000
+immediate_deploy = 100_000  # 59%
+cash_reserve = 70_000       # 41% in SGOV
+
+# Months 1-7 (March - October 2025)
+monthly_contribution = 0  # NO contributions yet
+monthly_deployment_from_reserve = 10_000  # From SGOV
+
+# Month 8+ (November 2025 onwards)
+monthly_contribution = 5_000  # START contributions
+monthly_deployment_from_reserve = 0  # SGOV exhausted
+
+# Position sizing
+num_positions = 20
+position_size = immediate_deploy / num_positions  # $5,000
+
+# Month 7 (Oct 2025): ~$170k / 20 = $8,500 per position
+# Month 13 (May 2026): ~$205k / 20 = $10,250 per position
+\end{lstlisting}
+
+\section{Performance Expectations}
+
+\subsection{Historical Backtest Results}
+
+\textbf{Period:} March 3 - October 13, 2025 (33 weeks, 7 months)
+
+\textbf{Scenario:} \$170k total (\$100k immediate deploy, \$70k gradual from SGOV)
 
 \begin{table}[H]
 \centering
-\begin{tabular}{lrrr}
+\begin{tabular}{lrr}
 \toprule
-\textbf{N Positions} & \textbf{CAGR} & \textbf{Sharpe} & \textbf{Max DD} \\
+\textbf{Metric} & \textbf{Backtest} & \textbf{Expected (gradual)} \\
 \midrule
-10 & 18.5\% & 1.15 & -17.9\% \\
-20 (base) & 17.0\% & 1.07 & -15.7\% \\
-30 & 15.8\% & 1.02 & -14.2\% \\
+Total Return & +5.77\% & +4-6\% \\
+CAGR & 9.63\% & 8-10\% \\
+Sharpe Ratio & 0.83 & 0.7-0.9 \\
+Max Drawdown & -7.95\% & -6\% to -10\% \\
+Stop-Losses & 3 in 33 weeks & 2-4 per 33 weeks \\
+Win Rate (closed) & 0\% & 0-20\% (by design) \\
+Turnover & ~8\% weekly & ~10\% weekly \\
 \bottomrule
 \end{tabular}
-\caption{Sensitivity to Portfolio Size}
+\caption{Performance Expectations}
 \end{table}
 
-Fewer positions yield higher returns but increased risk. 20 positions provide optimal balance.
+\textbf{Note:} Win rate is intentionally low because only losers close via stops, while winners run indefinitely.
 
-\section{Implementation Details}
+\subsection{Return Attribution}
 
-\subsection{Software Architecture}
+\textbf{Expected Annual Sources:}
 
-The system is implemented in Python with the following structure:
+\begin{enumerate}
+    \item \textbf{Factor Alpha:} +6\% annually
+    \begin{itemize}
+        \item Momentum: +2-3\%
+        \item Quality: +1-2\%
+        \item Low volatility: +1-2\%
+        \item Value (low expense): +0.5-1\%
+    \end{itemize}
+
+    \item \textbf{Stop-Loss Protection:} +1-2\% annually
+    \begin{itemize}
+        \item Avoided momentum crashes
+        \item Capped losses at -12\%
+        \item Preserved capital for redeployment
+    \end{itemize}
+
+    \item \textbf{Fixed Income Yield (Months 1-7 only):} +0.5-1\%
+    \begin{itemize}
+        \item SGOV yield ~5\% on declining balance (\$70k $\rightarrow$ \$0)
+        \item Average \$35k in SGOV $\times$ 5\% $\times$ 7/12 months $\approx$ \$1,000
+        \item As deployed, yield decreases but equity returns increase
+    \end{itemize}
+
+    \item \textbf{Cost Drag:} -0.5\% annually
+    \begin{itemize}
+        \item Average ETF expense ratio: 0.3\%
+        \item Transaction costs: 26 trades/33 weeks $\times$ 10 bps = 0.2\%
+    \end{itemize}
+\end{enumerate}
+
+\textbf{Net Expected Return:} 8-10\% CAGR
+
+\subsection{Risk Profile}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{Metric} & \textbf{Expected Value} \\
+\midrule
+Annualized Volatility & 12-15\% (moderate) \\
+Maximum Position Loss & -12\% (enforced by stop) \\
+Maximum Portfolio Loss & -12\% (theoretical, all stops) \\
+Typical Drawdown & -5\% to -10\% \\
+Recovery Time & 2-4 weeks \\
+\bottomrule
+\end{tabular}
+\caption{Risk Profile}
+\end{table}
+
+\section{Implementation: Interactive Brokers}
+
+\subsection{Account Requirements}
 
 \begin{itemize}
-    \item \texttt{src/factors/}: Factor calculation modules
-    \item \texttt{src/portfolio/}: Portfolio optimization and risk management
-    \item \texttt{src/backtesting/}: Event-driven backtest engine
-    \item \texttt{scripts/}: Production scripts for live trading
-    \item \texttt{tests/}: 83+ unit and integration tests
+    \item \textbf{Account Type:} Individual or Margin
+    \item \textbf{Permissions:} Stock/ETF trading, Stop orders
+    \item \textbf{Platform:} TWS (Trader Workstation) or Web
 \end{itemize}
 
-\subsection{Data Pipeline}
+\subsection{Order Entry Process}
+
+\textbf{Step 1: Buy ETF (Market Order)}
+
+\begin{lstlisting}[caption={Initial Buy Order}]
+Ticker: [from top 20 list]
+Action: BUY
+Shares: Calculate = $5,000 / current_price
+Order Type: MARKET
+Time in Force: DAY
+\end{lstlisting}
+
+\textbf{Step 2: Immediate Stop-Loss (within 5 minutes)}
+
+\begin{lstlisting}[caption={Stop-Loss Order}]
+Ticker: [same as above]
+Action: SELL
+Shares: [all shares from position]
+Order Type: STOP
+Stop Price: Entry_price x 0.88 (-12%)
+Time in Force: GTC (Good-Til-Canceled)
+\end{lstlisting}
+
+\subsection{Critical Order Settings}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{Setting} & \textbf{Value} \\
+\midrule
+Stop Trigger Method & LAST (not Bid/Ask) \\
+Outside RTH & NO (prevent after-hours triggers) \\
+Order Type & STOP (NOT STOP-LIMIT) \\
+Time in Force & GTC \\
+\bottomrule
+\end{tabular}
+\caption{Interactive Brokers Order Settings}
+\end{table}
+
+\textbf{Rationale for STOP (not STOP-LIMIT):}
+\begin{itemize}
+    \item STOP converts to market order when triggered (ensures execution)
+    \item STOP-LIMIT can fail to fill if price gaps through limit
+    \item In volatile markets, execution certainty > price optimization
+\end{itemize}
+
+\subsection{Position Tracking}
+
+\textbf{Required Data Per Position:}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{Field} & \textbf{Purpose} \\
+\midrule
+Ticker & Identification \\
+Entry Date & Calculate holding period \\
+Entry Price & Stop-loss calculation \\
+Shares & Position size \\
+Stop Price & Entry price $\times$ 0.88 \\
+Peak Price & Trailing stop calculation \\
+Days Held & Performance analysis \\
+\bottomrule
+\end{tabular}
+\caption{Position Tracking Fields}
+\end{table}
+
+\section{Workflow Procedures}
+
+\subsection{Weekly Workflow (Every Monday)}
+
+\textbf{Time Required:} 30 minutes
 
 \begin{enumerate}
-    \item \textbf{Collection}: Download ETF prices via yfinance API
-    \item \textbf{Validation}: Filter for data quality (min price, max volatility, max missing)
-    \item \textbf{Factor Calculation}: Compute momentum, quality, value, volatility scores
-    \item \textbf{Integration}: Combine factors using geometric mean
-    \item \textbf{Optimization}: Mean-variance optimization with Axioma adjustment
-    \item \textbf{Execution}: Generate trade recommendations with transaction cost estimates
+    \item \textbf{Update Peak Prices (10 min)}
+    \begin{itemize}
+        \item For each position, check current price
+        \item If current $>$ peak: Update peak price
+        \item Record in tracking spreadsheet
+    \end{itemize}
+
+    \item \textbf{Check Stop-Losses (15 min)}
+    \begin{itemize}
+        \item Review each position against -12\% threshold
+        \item Verify stop orders still active in IB (GTC status)
+        \item Note positions near stop (-10\% to -12\%)
+    \end{itemize}
+
+    \item \textbf{Review Portfolio (5 min)}
+    \begin{itemize}
+        \item Calculate unrealized P\&L
+        \item Note positions approaching +10\% (for trailing stops)
+        \item Verify total portfolio value
+    \end{itemize}
 \end{enumerate}
 
-\subsection{Computational Requirements}
+\subsection{Bi-Weekly Factor Update}
+
+\textbf{Time Required:} 60 minutes
+
+\textbf{Frequency:} Weeks 1, 3, 5, 7, etc. (every 2 weeks)
+
+\begin{enumerate}
+    \item \textbf{Recalculate Factors (automated)}
+    \begin{lstlisting}
+python scripts/run_weekly_portfolio.py
+    \end{lstlisting}
+
+    \item \textbf{Review Top 20 Candidates}
+    \begin{itemize}
+        \item Check if current holdings remain in top 30
+        \item Identify new buy candidates for empty slots
+    \end{itemize}
+
+    \item \textbf{Fill Empty Slots (if any)}
+    \begin{itemize}
+        \item For each empty slot from stop-losses
+        \item Buy highest-ranked ETF not currently held
+        \item Calculate shares: cash\_available / empty\_slots
+        \item Place market order + immediate stop-loss
+    \end{itemize}
+
+    \item \textbf{Update Tracking}
+    \begin{itemize}
+        \item Record new positions in spreadsheet
+        \item Set entry price, date, stop level
+        \item Initialize peak price = entry price
+    \end{itemize}
+\end{enumerate}
+
+\subsection{Monthly Workflow}
+
+\textbf{Time Required:} 30 minutes
+
+\textbf{Timing:} Last week of each month
+
+\begin{enumerate}
+    \item \textbf{Add Monthly Contribution}
+    \begin{itemize}
+        \item Transfer \$5,000 to Interactive Brokers (Month 8+)
+        \item Wait for funds to settle (1-2 business days)
+    \end{itemize}
+
+    \item \textbf{Deploy Capital}
+    \begin{itemize}
+        \item Option A: Fill empty slots (priority)
+        \item Option B: Increase existing position sizes
+        \item Update stop-loss orders if adding to positions
+    \end{itemize}
+
+    \item \textbf{Performance Review}
+    \begin{itemize}
+        \item Calculate month-to-date return
+        \item Compare to SPY benchmark
+        \item Review stop-loss frequency
+        \item Check win rate on closed positions
+    \end{itemize}
+\end{enumerate}
+
+\section{Key Principles}
+
+\subsection{DO - Critical Success Factors}
+
+\begin{enumerate}
+    \item \textbf{Place stop-loss IMMEDIATELY} after every buy (within 5 minutes)
+    \item \textbf{Let winners run} indefinitely (no upside cap)
+    \item \textbf{Sell ONLY when stop triggers} (not because ranking dropped)
+    \item \textbf{Update peak prices weekly} (for trailing stops)
+    \item \textbf{Record every trade} in tracking spreadsheet
+\end{enumerate}
+
+\subsection{DON'T - Common Mistakes}
+
+\begin{enumerate}
+    \item \textbf{Never sell} because position dropped in ranking
+    \item \textbf{Never remove} or widen stop-loss orders
+    \item \textbf{Never deploy} all SGOV at once
+    \item \textbf{Never use} STOP-LIMIT orders (use pure STOP)
+    \item \textbf{Never allow} after-hours stop triggers
+    \item \textbf{Never skip} recording trades
+\end{enumerate}
+
+\section{Performance Monitoring}
+
+\subsection{Weekly Metrics}
 
 \begin{itemize}
-    \item Data storage: $\sim$1 GB (5 years daily prices for 623 ETFs)
-    \item Factor calculation: $\sim$30 seconds
-    \item Portfolio optimization (CVXPY): $\sim$1 second
-    \item Full backtest (3 periods, 4 optimizers): $\sim$10 minutes
+    \item Portfolio return (week-over-week)
+    \item Unrealized P\&L (total)
+    \item Number of positions
+    \item Cash balance
+    \item Positions near stop (-10\% to -12\%)
 \end{itemize}
 
-\section{Conclusions}
-
-\subsection{Key Findings}
-
-\begin{enumerate}
-    \item \textbf{Strategy Validation}: The AQR multi-factor approach successfully outperforms targets on real data, achieving 17.0\% CAGR with 1.07 Sharpe ratio.
-
-    \item \textbf{Optimizer Selection}: Mean-variance optimization with Axioma adjustment (MVO) demonstrates superior risk-adjusted returns and robustness across market regimes.
-
-    \item \textbf{Risk Management Success}: All strategies maintained maximum drawdowns below -27\%, with 100\% success rate on the -25\% target.
-
-    \item \textbf{Low Turnover Achievement}: MVO averaged only 2.4 rebalances per year, far below the targeted limit, minimizing transaction costs.
-
-    \item \textbf{Market Regime Robustness}: The strategy performed well in bull markets (+28\% CAGR), stayed resilient in bear markets (near breakeven), and rebounded strongly in recovery (+23\% CAGR).
-\end{enumerate}
-
-\subsection{Practical Implications for Investors}
-
-\begin{enumerate}
-    \item \textbf{Expected Returns}: Investors can reasonably expect 15-18\% annual returns with appropriate risk management.
-
-    \item \textbf{Risk Profile}: Maximum drawdowns likely to stay below -20\% with VIX-adjusted stop-loss in place.
-
-    \item \textbf{Costs}: Annual transaction costs approximately \$660 per \$1M portfolio (0.066\%), negligible impact on returns.
-
-    \item \textbf{Operational Simplicity}: Strategy requires only 2-3 rebalances per year, suitable for manual execution.
-
-    \item \textbf{Scalability}: Strategy capacity is large (ETF market), suitable for portfolios up to \$100M+ without material market impact.
-\end{enumerate}
-
-\subsection{Recommended Implementation}
-
-For deployment, we recommend:
+\subsection{Monthly Metrics}
 
 \begin{itemize}
-    \item \textbf{Optimizer}: Mean-Variance Optimizer (MVO) with Axioma adjustment
-    \item \textbf{Risk Aversion}: $\lambda = 1.0$
-    \item \textbf{Axioma Penalty}: $\gamma = 0.01$
-    \item \textbf{Positions}: 20 ETFs
-    \item \textbf{Rebalance Threshold}: 5\% drift
-    \item \textbf{Stop-Loss}: VIX-adjusted (10\%/12\%/15\%)
-    \item \textbf{Factor Weights}: Equal (25\% each)
+    \item Monthly return vs SPY
+    \item Sharpe ratio (rolling 3-month)
+    \item Max drawdown (month-to-date)
+    \item Number of stop-losses triggered
+    \item Win rate on closed positions
+    \item Average hold time
 \end{itemize}
 
-\subsection{Limitations and Future Research}
+\subsection{Quarterly Review}
+
+\begin{itemize}
+    \item CAGR (annualized return)
+    \item Volatility (annualized std dev)
+    \item Sharpe ratio (rolling 12-month)
+    \item Maximum drawdown (worst peak-to-trough)
+    \item Total transaction costs
+    \item Strategy vs SPY comparison
+\end{itemize}
+
+\section{Academic References}
 
 \begin{enumerate}
-    \item \textbf{Data Period}: Validation covers 5 years; longer history would strengthen conclusions.
+    \item Jegadeesh, N., \& Titman, S. (1993). Returns to buying winners and selling losers: Implications for stock market efficiency. \textit{Journal of Finance}, 48(1), 65-91.
 
-    \item \textbf{Market Conditions}: Future market regimes may differ from historical periods tested.
-
-    \item \textbf{Factor Weights}: Equal weighting (25\% each) is simple but may not be optimal; dynamic weighting could improve performance.
-
-    \item \textbf{Universe Expansion}: Strategy could be extended to global ETFs for enhanced diversification.
-
-    \item \textbf{Sector Constraints}: Current implementation lacks sector diversification constraints, which could reduce concentration risk.
-\end{enumerate}
-
-\section{References}
-
-\begin{enumerate}
-    \item Jegadeesh, N., \& Titman, S. (1993). Returns to buying winners and selling losers: Implications for stock market efficiency. \textit{The Journal of Finance}, 48(1), 65-91.
-
-    \item Markowitz, H. (1952). Portfolio selection. \textit{The Journal of Finance}, 7(1), 77-91.
-
-    \item Ang, A., Hodrick, R. J., Xing, Y., \& Zhang, X. (2006). The cross-section of volatility and expected returns. \textit{The Journal of Finance}, 61(1), 259-299.
+    \item Han, Y., Zhou, G., \& Zhu, Y. (2014). Taming momentum crashes: A simple stop-loss strategy. \textit{Available at SSRN}.
 
     \item Asness, C. S., Frazzini, A., \& Pedersen, L. H. (2019). Quality minus junk. \textit{Review of Accounting Studies}, 24(1), 34-112.
 
-    \item Axioma Inc. (2011). \textit{Portfolio Optimization}. Axioma Research Paper No. 11.
+    \item Baker, M., Bradley, B., \& Wurgler, J. (2011). Benchmarks as limits to arbitrage: Understanding the low-volatility anomaly. \textit{Financial Analysts Journal}, 67(1), 40-54.
+
+    \item AQR Capital Management. (2014). Fact, Fiction, and Momentum Investing. White Paper.
+
+    \item Damodaran, A. (2012). \textit{Investment Philosophies: Successful Strategies and the Investors Who Made Them Work}. 2nd Edition, Wiley.
 \end{enumerate}
 
-\appendix
+\section{Appendices}
 
-\section{Mathematical Proofs}
+\subsection{Position Tracking Template}
 
-\subsection{Proof: Geometric Mean Requires Multi-Factor Consistency}
+Create Excel/Google Sheets with these columns:
 
-Consider two assets with factor scores:
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{llllll}
+\toprule
+\textbf{Ticker} & \textbf{Entry Date} & \textbf{Entry Price} & \textbf{Shares} & \textbf{Stop Price} & \textbf{Days Held} \\
+\midrule
+USMV & 2025-11-04 & \$92.00 & 54 & \$80.96 & 7 \\
+GLD & 2025-11-04 & \$275.00 & 18 & \$242.00 & 7 \\
+\ldots & \ldots & \ldots & \ldots & \ldots & \ldots \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Update weekly:} Current Price, Peak Price, Unrealized P\&L, Days Held
+
+\subsection{Success Criteria (6-Month Check-In)}
+
+\textbf{By May 2026, you should see:}
+
 \begin{itemize}
-    \item Asset A: $z_1 = 2, z_2 = 2, z_3 = 2, z_4 = 2$
-    \item Asset B: $z_1 = 4, z_2 = 4, z_3 = 0, z_4 = 0$
+    \item \textbf{Performance:}
+    \begin{itemize}
+        \item Portfolio value: \$215k-\$235k
+        \item Return: +6\% to +18\% cumulative
+        \item Beating SPY by 0-5\% (risk-adjusted)
+    \end{itemize}
+
+    \item \textbf{Risk Control:}
+    \begin{itemize}
+        \item Max drawdown: Less than -12\%
+        \item Stop-losses triggered: 6-15 positions total
+        \item Average stop-loss: Close to -12\%
+    \end{itemize}
+
+    \item \textbf{Operational:}
+    \begin{itemize}
+        \item All positions have active stop orders
+        \item Position tracking maintained
+        \item Weekly/bi-weekly workflows established
+    \end{itemize}
+
+    \item \textbf{Capital:}
+    \begin{itemize}
+        \item SGOV fully deployed
+        \item \$30k from monthly contributions added
+        \item Portfolio size: ~\$200k
+    \end{itemize}
 \end{itemize}
 
-Arithmetic mean:
-\begin{align}
-\text{Score}_A^{\text{arith}} &= \frac{1}{4}(2 + 2 + 2 + 2) = 2.0 \\
-\text{Score}_B^{\text{arith}} &= \frac{1}{4}(4 + 4 + 0 + 0) = 2.0
-\end{align}
+\section{Conclusion}
 
-Geometric mean (with $c=3$):
-\begin{align}
-\text{Score}_A^{\text{geom}} &= \sqrt[4]{(5)(5)(5)(5)} - 3 = 2.0 \\
-\text{Score}_B^{\text{geom}} &= \sqrt[4]{(7)(7)(3)(3)} - 3 \approx 1.9
-\end{align}
+This strategy represents a systematic, disciplined approach to ETF investing that balances factor-based selection with risk management through stop-losses. The 82\% reduction in turnover compared to weekly rebalancing, combined with strong risk-adjusted returns (9.63\% CAGR, 0.83 Sharpe), demonstrates the viability of the ``Let Winners Run, Cut Losers Quickly'' philosophy.
 
-Asset B scores lower despite equal arithmetic mean because it lacks balance. This demonstrates how geometric mean penalizes inconsistency.
+Success requires adherence to three principles:
+\begin{enumerate}
+    \item \textbf{Systematic Execution:} Follow the factor signals, place stops immediately
+    \item \textbf{Discipline:} Never override stop-losses or sell winners prematurely
+    \item \textbf{Patience:} Allow capital deployment schedule to unfold over 7 months
+\end{enumerate}
 
-\section{Code Listings}
+The strategy is production-ready and validated on real market data. Implementation can begin immediately following the procedures outlined in Section 7.
 
-\subsection{Factor Calculation Example}
+\vspace{1cm}
 
-\begin{lstlisting}[language=Python, basicstyle=\small\ttfamily]
-def calculate_momentum(prices, lookback=252, skip_recent=21):
-    """
-    Calculate momentum factor with skip_recent to avoid reversal.
-
-    Parameters:
-    - prices: DataFrame of ETF prices (dates x tickers)
-    - lookback: Days to look back (252 = 1 year)
-    - skip_recent: Days to skip at end (21 = 1 month)
-
-    Returns:
-    - Series of momentum scores (z-scores)
-    """
-    returns = prices.pct_change(lookback).shift(skip_recent)
-    momentum_scores = (returns - returns.mean()) / returns.std()
-    return momentum_scores
-\end{lstlisting}
-
-\subsection{MVO Optimization with Axioma Adjustment}
-
-\begin{lstlisting}[language=Python, basicstyle=\small\ttfamily]
-import cvxpy as cp
-
-def optimize_portfolio(factor_scores, returns,
-                      risk_aversion=1.0, axioma_penalty=0.01):
-    """
-    Mean-variance optimization with Axioma adjustment.
-    """
-    N = len(factor_scores)
-    w = cp.Variable(N)
-
-    # Expected returns from factor scores (normalized)
-    alpha = factor_scores / factor_scores.sum()
-
-    # Covariance matrix from historical returns
-    Sigma = returns.cov().values
-
-    # Objective: alpha'w + (gamma - lambda/2) w'Sigma w
-    objective = cp.Maximize(
-        alpha @ w +
-        (axioma_penalty - risk_aversion/2) * cp.quad_form(w, Sigma)
-    )
-
-    # Constraints
-    constraints = [
-        cp.sum(w) == 1,  # Fully invested
-        w >= 0           # Long-only
-    ]
-
-    problem = cp.Problem(objective, constraints)
-    problem.solve()
-
-    return w.value
-\end{lstlisting}
+\noindent\textbf{Document Version:} 2.0 (Final) \\
+\textbf{Date:} October 31, 2025 \\
+\textbf{Status:} Production Ready \\
+\textbf{Author:} Stuart with Claude AI Assistance
 
 \end{document}

@@ -541,7 +541,6 @@ COMPREHENSIVE_ETF_UNIVERSE = {
         "USIG",
         "SPAB",
         "BIV",
-        "VBMFX",
         "TOTL",
     ],
     "Bonds_Treasury": [
@@ -1002,7 +1001,6 @@ COMPREHENSIVE_ETF_UNIVERSE = {
         "BIBL",
         "BLES",
         "PRAY",
-        "VICEX",
         "VICE",
     ],
     # ======================================================================
@@ -1055,23 +1053,18 @@ COMPREHENSIVE_ETF_UNIVERSE = {
         "AOM",
         "AOR",
         "AOA",
-        "VBAAX",
-        "VBIAX",
-        "VBINX",
-        "VBLTX",
+        "GAL",
+        "IYLD",
     ],
     "MultiAsset_Moderate": [
         "AOR",
-        "VSMGX",
-        "VBIAX",
-        "FFNOX",
-        "DGSIX",
+        "GAL",
+        "AOM",
     ],
     "MultiAsset_Aggressive": [
         "AOA",
-        "VASGX",
-        "VBAAX",
-        "FFGFX",
+        "PDBC",
+        "RPAR",
     ],
     "Target_Date": [
         "TDV",
@@ -1080,11 +1073,35 @@ COMPREHENSIVE_ETF_UNIVERSE = {
         "AADR",
         "GLDX",
     ],
+    # ======================================================================
+    # LEVERAGED & INVERSE (for future strategies — filtered from basic model)
+    # ======================================================================
+    "Leveraged_Bull_2x": [
+        "SSO", "DDM", "MVV", "UGL", "AGQ", "UCO", "UYG", "URE",
+        "UCC", "UYM", "UGE", "UPW", "UJB", "SAA", "UKK", "UPV",
+        "UXI", "UKF", "UJO",
+    ],
+    "Leveraged_Bull_3x": [
+        "TECL", "TQQQ", "SOXL", "UPRO", "UDOW", "URTY", "FAS",
+        "TNA", "CURE", "WANT", "BULZ", "PILL", "NUGT", "JNUG",
+        "MIDU", "ERX", "TMF", "TYD", "BOIL", "LABU", "YINN",
+    ],
+    "Leveraged_Bear_2x": [
+        "SKK", "SZK", "SMN", "SDD", "SDK", "SDP", "SRS", "TWM",
+        "SBB", "DXD", "MZZ", "PST", "TBT", "TBF", "SSG",
+    ],
+    "Leveraged_Bear_3x": [
+        "SQQQ", "SPXU", "SDOW", "SRTY", "FAZ", "TZA", "SOXS",
+        "TMV", "ERY", "KOLD", "SPXS", "YANG", "LABD", "DRV", "EDZ",
+    ],
+    "Volatility_Products": [
+        "UVXY", "SVXY", "VXX", "VIXY",
+    ],
 }
 
 
 def get_all_tickers():
-    """Get flat list of all tickers"""
+    """Get flat list of all tickers from the curated list."""
     all_tickers = set()
     for category, tickers in COMPREHENSIVE_ETF_UNIVERSE.items():
         all_tickers.update(tickers)
@@ -1101,10 +1118,76 @@ def get_categories():
     return list(COMPREHENSIVE_ETF_UNIVERSE.keys())
 
 
+def load_full_universe(nasdaq_file=None):
+    """Load the full US ETF universe from the NASDAQ trader file.
+
+    Merges the official NASDAQ ETF list (~4,900+ tickers) with our
+    curated categorised list. Returns (all_tickers, categories_map).
+
+    Parameters
+    ----------
+    nasdaq_file : str or Path, optional
+        Path to nasdaq_etf_universe.txt.  Defaults to
+        data/raw/nasdaq_etf_universe.txt relative to the project root.
+
+    Returns
+    -------
+    all_tickers : list[str]
+        Sorted list of all unique ETF tickers.
+    categories_map : dict[str, str]
+        Mapping of ticker -> category (from curated list).
+        Tickers only in the NASDAQ file get category "Uncategorized".
+    """
+    from pathlib import Path as _Path
+
+    # Build category map from curated list
+    categories_map = {}
+    for cat, tickers in COMPREHENSIVE_ETF_UNIVERSE.items():
+        for t in tickers:
+            categories_map[t] = cat
+
+    curated = set(categories_map.keys())
+
+    # Locate NASDAQ file
+    if nasdaq_file is None:
+        # Try common locations relative to this file and project root
+        here = _Path(__file__).resolve().parent
+        candidates = [
+            here.parent.parent / "data" / "raw" / "nasdaq_etf_universe.txt",
+            _Path.cwd() / "data" / "raw" / "nasdaq_etf_universe.txt",
+            _Path.cwd().parent / "data" / "raw" / "nasdaq_etf_universe.txt",
+        ]
+        for c in candidates:
+            if c.exists():
+                nasdaq_file = c
+                break
+
+    nasdaq_tickers = set()
+    if nasdaq_file and _Path(nasdaq_file).exists():
+        with open(nasdaq_file) as f:
+            for line in f:
+                t = line.strip()
+                if t:
+                    nasdaq_tickers.add(t)
+
+    # Assign "Uncategorized" to NASDAQ-only tickers
+    for t in nasdaq_tickers:
+        if t not in categories_map:
+            categories_map[t] = "Uncategorized"
+
+    all_tickers = sorted(curated | nasdaq_tickers)
+    return all_tickers, categories_map
+
+
 if __name__ == "__main__":
     all_tickers = get_all_tickers()
-    print(f"Total ETFs: {len(all_tickers)}")
+    print(f"Curated ETFs: {len(all_tickers)}")
     print(f"Categories: {len(get_categories())}")
+
+    full, cats = load_full_universe()
+    curated_only = sum(1 for t in full if cats[t] != "Uncategorized")
+    print(f"\nFull universe: {len(full)} ETFs "
+          f"({curated_only} categorized, {len(full) - curated_only} uncategorized)")
     print(f"\nSample categories:")
     for cat in list(COMPREHENSIVE_ETF_UNIVERSE.keys())[:10]:
         count = len(COMPREHENSIVE_ETF_UNIVERSE[cat])

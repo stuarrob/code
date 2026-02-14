@@ -6,7 +6,8 @@ from contextlib import asynccontextmanager
 
 from app.core.config import settings
 from app.core.database import init_db, close_db
-from app.api import portfolios, positions, trades, factors, performance, risk, data
+from app.api import portfolios, positions, trades, factors, performance, risk, data, ib
+from app.services.ib_connection import ib_manager
 
 
 @asynccontextmanager
@@ -22,10 +23,19 @@ async def lifespan(app: FastAPI):
     await init_db()
     print("✅ Database initialized")
 
+    # Connect to IB Gateway (if enabled)
+    ib_connected = await ib_manager.connect()
+    if ib_connected:
+        print("✅ Connected to IB Gateway")
+    else:
+        print("ℹ️  IB Gateway not connected (disabled or unavailable)")
+
     yield
 
     # Shutdown
     print("👋 Shutting down ETFTrader API...")
+    await ib_manager.disconnect()
+    print("✅ IB Gateway disconnected")
     await close_db()
     print("✅ Database connections closed")
 
@@ -63,7 +73,10 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    return {"status": "healthy"}
+    return {
+        "status": "healthy",
+        "ib_gateway": ib_manager.get_status(),
+    }
 
 
 # Include routers
@@ -74,6 +87,7 @@ app.include_router(factors.router, prefix="/api/factors", tags=["Factors"])
 app.include_router(performance.router, prefix="/api/performance", tags=["Performance"])
 app.include_router(risk.router, prefix="/api/risk", tags=["Risk"])
 app.include_router(data.router, prefix="/api/data", tags=["Data"])
+app.include_router(ib.router, prefix="/api/ib", tags=["Interactive Brokers"])
 
 
 if __name__ == "__main__":

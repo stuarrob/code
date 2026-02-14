@@ -433,7 +433,7 @@ def main():
     # Display and save results
     display_results(results)
 
-    output_dir = project_root / "results" / "backtest_growth"
+    output_dir = Path.home() / "trading" / "backtest_growth"
     save_results(results, output_dir)
 
     logger.info(f"\n{'='*60}")

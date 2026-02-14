@@ -53,7 +53,14 @@
       "Bash(sudo -S docker-compose:*)",
       "Bash(sudo -S docker logs:*)",
       "Bash(sudo -S docker exec -i etftrader-postgres psql -U etftrader -d etftrader -c \"DELETE FROM trades; DELETE FROM positions; DELETE FROM portfolios;\")",
-      "Bash(sudo -S docker exec -i:*)"
+      "Bash(sudo -S docker exec -i:*)",
+      "Bash(timeout 300 python:*)",
+      "Bash(timeout 120 python:*)",
+      "Bash(timeout 180 python:*)",
+      "Bash(timeout 1800 python:*)",
+      "Bash(timeout 1800 /home/stuar/code/ETFTrader/venv/bin/python:*)",
+      "Bash(PYTHONPATH=/home/stuar/code/ETFTrader python:*)",
+      "Bash(timeout 600 /home/stuar/code/ETFTrader/venv/bin/python:*)"
     ],
     "deny": [],
     "ask": []

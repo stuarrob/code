@@ -34,6 +34,9 @@ pyarrow==14.0.1  # Required for parquet file support
 httpx==0.25.2
 aiohttp==3.9.1
 
+# Interactive Brokers
+ib_insync==0.9.86
+
 # Background Tasks (Phase 2)
 # celery==5.3.4
 # flower==2.0.1

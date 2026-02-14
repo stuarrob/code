@@ -20,7 +20,11 @@ Reference: "Fact, Fiction, and Factor Investing" - AQR (2016)
 import pandas as pd
 import numpy as np
 from typing import Dict, List
-from src.utils.logging_config import get_logger
+try:
+    from src.utils.logging_config import get_logger
+except ModuleNotFoundError:
+    import logging
+    get_logger = logging.getLogger
 
 logger = get_logger(__name__)
 

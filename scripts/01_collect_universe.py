@@ -27,7 +27,7 @@ from src.data_collection.etf_universe_builder import (
 DATA_DIR = PROJECT_ROOT / "data" / "raw"
 PRICES_DIR = DATA_DIR / "prices"
 UNIVERSE_FILE = DATA_DIR / "etf_universe.csv"
-RESULTS_DIR = PROJECT_ROOT / "results"
+RESULTS_DIR = Path.home() / "trading"
 
 # Create directories
 PRICES_DIR.mkdir(parents=True, exist_ok=True)
