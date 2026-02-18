@@ -1,0 +1,866 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage{colortbl}
+
+\geometry{margin=1in}
+
+\title{\textbf{Leveraged ETF Momentum Strategy}\\
+\large Technical Strategy Document}
+
+\author{Quantitative Portfolio Management\\
+Backtest Period: February 2021 -- February 2026}
+
+\date{February 15, 2026 \\ Version 3.0 --- Expanded Universe \& Diversification}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    filecolor=magenta,
+    urlcolor=cyan,
+    pdftitle={Leveraged ETF Momentum Strategy},
+    pdfpagemode=FullScreen,
+}
+
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    commentstyle=\color{gray},
+    stringstyle=\color{red},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    breaklines=true,
+    frame=single,
+    captionpos=b
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This document describes a systematic leveraged ETF momentum strategy that uses trend-following signals and volatility-regime filtering to time exposure to leveraged equity ETFs (2x and 3x). The strategy invests only during favourable conditions---reference index above its 200-day SMA and realised volatility below a reference-specific threshold---and exits to cash otherwise. In Version 3.0, the universe is expanded from 2 to \textbf{17 leveraged ETFs} across 8 sectors, with reference-specific vol-filter calibration. The standout finding is that a \textbf{diversified equal-weight portfolio of TECL (3x Technology) and NAIL (3x Homebuilders)} achieves \textbf{31.4\% CAGR} with a \textbf{1.15 Sharpe ratio} and \textbf{-24.1\% maximum drawdown}, exploiting a remarkably low cross-strategy correlation of 0.09. A three-ETF portfolio (TECL + NAIL + FAS) achieves 23.9\% CAGR with 0.98 Sharpe and only -19.4\% maximum drawdown at 33\% maximum single-sector concentration. Rebalancing frequency is approximately 15--17 trades per ETF per year (monthly plus signal transitions). VIX integration was tested comprehensively but found to be redundant with the existing realised volatility filter ($\rho = 0.70$).
+\end{abstract}
+
+\newpage
+\tableofcontents
+\newpage
+
+%% ============================================================
+\section{Executive Summary}
+%% ============================================================
+
+\subsection{Strategy at a Glance}
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lr}
+\toprule
+\textbf{Metric} & \textbf{Value (TECL+NAIL Portfolio)} \\
+\midrule
+\rowcolor{green!10} CAGR & \textbf{31.4\%} \\
+\rowcolor{green!10} Sharpe Ratio & \textbf{1.15} \\
+Maximum Drawdown & -24.1\% \\
+Calmar Ratio & 1.30 \\
+Cross-Strategy Correlation & 0.09 \\
+Rebalancing Frequency & $\sim$16 trades/ETF/year \\
+Backtest Period & February 2021 -- February 2026 (5 years) \\
+Universe & 17 leveraged ETFs across 8 sectors \\
+Primary Signal & SMA 200 on reference index \\
+Vol Filter & Reference-specific (15--22\%) \\
+Data Source & Interactive Brokers historical API \\
+\bottomrule
+\end{tabular}
+\caption{Strategy Metrics --- Recommended TECL+NAIL Diversified Portfolio}
+\end{table}
+
+\subsection{Comparison Across Configurations}
+
+\subsubsection{Single-ETF Results (Config C: SMA + Vol Filter)}
+
+The strategy was tested across all 17 leveraged ETFs using optimised vol-filter thresholds per reference index:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{llrrrrrr}
+\toprule
+\textbf{ETF} & \textbf{Ref} & \textbf{Vol Thr} & \textbf{CAGR} & \textbf{Sharpe} & \textbf{Max DD} & \textbf{Calmar} & \textbf{Time In} \\
+\midrule
+\rowcolor{green!10} TECL (3x) & XLK & 22\% & \textbf{38.3\%} & \textbf{1.00} & -34.0\% & \textbf{1.12} & 35\% \\
+\rowcolor{green!10} ROM (2x) & XLK & 22\% & 26.8\% & 0.99 & \textbf{-23.0\%} & 1.16 & 35\% \\
+TQQQ (3x) & QQQ & 20\% & 26.5\% & 0.82 & -33.2\% & 0.80 & 46\% \\
+QLD (2x) & QQQ & 20\% & 19.3\% & 0.81 & -22.6\% & 0.85 & 46\% \\
+DUSL (3x) & XLI & 0\% & 22.6\% & 0.69 & -37.3\% & 0.61 & 100\% \\
+NAIL (3x) & ITB & 22\% & 18.5\% & 0.66 & -35.7\% & 0.52 & 5\% \\
+SOXL (3x) & SMH & 0\% & 18.4\% & 0.58 & -77.9\% & 0.24 & 100\% \\
+SPXL (3x) & SPY & 15\% & 11.2\% & 0.48 & -30.3\% & 0.37 & 60\% \\
+UPRO (3x) & SPY & 15\% & 11.1\% & 0.47 & -30.3\% & 0.37 & 60\% \\
+SSO (2x) & SPY & 15\% & 8.7\% & 0.47 & -20.8\% & 0.42 & 60\% \\
+LABU (3x) & XBI & 25\% & 11.3\% & 0.43 & -41.0\% & 0.28 & 7\% \\
+FAS (3x) & XLF & 22\% & 5.0\% & 0.26 & -42.6\% & 0.12 & 52\% \\
+UYG (2x) & XLF & 22\% & 5.5\% & 0.26 & -29.8\% & 0.18 & 52\% \\
+\bottomrule
+\end{tabular}
+\caption{Leveraged ETF Universe --- Config C with Optimised Thresholds (\$1M initial)}
+\end{table}
+
+\textbf{Key finding}: The optimal vol-filter threshold varies by reference index: 15\% for SPY, 20\% for QQQ, 22\% for XLK/XLF/IWM/ITB, and 25\% for XBI. SOXL and DUSL perform best with no vol filter at all (their sectors are either strongly trending or deeply depressed, making binary entry/exit more effective than volatility filtering).
+
+\subsubsection{Diversified Portfolio Results}
+
+Equal-weight combinations of uncorrelated strategies dramatically improve risk-adjusted returns:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lrrrrrr}
+\toprule
+\textbf{Portfolio} & \textbf{N} & \textbf{CAGR} & \textbf{Sharpe} & \textbf{Max DD} & \textbf{Calmar} & \textbf{Avg Corr} \\
+\midrule
+\rowcolor{green!10} \textbf{TECL + NAIL} & \textbf{2} & \textbf{31.4\%} & \textbf{1.15} & \textbf{-24.1\%} & \textbf{1.30} & \textbf{0.09} \\
+Top 5 (TQQQ+TECL+ROM+NAIL+DUSL) & 5 & 29.5\% & 1.12 & -23.9\% & 1.23 & --- \\
+Top 4 (TQQQ+TECL+ROM+NAIL) & 4 & 29.8\% & 1.09 & -24.5\% & 1.22 & --- \\
+ROM + NAIL + UYG & 3 & 18.9\% & 0.99 & -15.7\% & 1.20 & --- \\
+\rowcolor{yellow!20} TECL + NAIL + FAS (3 sectors) & 3 & 23.9\% & 0.98 & -19.4\% & 1.23 & 0.14 \\
+Sector spread (5 ETFs) & 5 & 22.9\% & 0.98 & -20.7\% & 1.11 & 0.23 \\
+2x only: QLD + ROM & 2 & 23.3\% & 0.95 & -22.8\% & 1.02 & --- \\
+All 8 ETFs & 8 & 23.4\% & 0.97 & -22.8\% & 1.03 & --- \\
+\midrule
+\textit{TQQQ alone (for comparison)} & 1 & 26.5\% & 0.82 & -33.2\% & 0.80 & --- \\
+\bottomrule
+\end{tabular}
+\caption{Diversified Portfolio Combinations --- Equal Weight, Monthly Rebalance}
+\end{table}
+
+\textbf{TECL + NAIL} is the recommended portfolio: a 1.15 Sharpe with 0.09 cross-strategy correlation represents genuine diversification, not dilution. For investors seeking lower concentration, TECL + NAIL + FAS (highlighted yellow) achieves 0.98 Sharpe with 33\% maximum single-sector weight and only -19.4\% max drawdown.
+
+%% ============================================================
+\section{Strategy Design}
+%% ============================================================
+
+\subsection{Core Concept}
+
+Leveraged ETFs amplify daily index returns by 2x or 3x, offering substantial upside in trending markets but suffering from two structural risks:
+
+\begin{enumerate}[noitemsep]
+    \item \textbf{Volatility decay}: Daily rebalancing causes path-dependent erosion in choppy markets. A 3x ETF tracking an index that falls 10\% then rises 10\% loses more than the index due to geometric compounding of daily returns.
+    \item \textbf{Catastrophic drawdowns}: A 30\% index decline translates to a 60--80\% loss in a 3x fund, requiring a 150--400\% gain to recover.
+\end{enumerate}
+
+The strategy addresses both risks by investing \emph{only} during calm uptrends and exiting to cash otherwise. This is motivated by a key empirical observation: the worst trading days for leveraged ETFs cluster during periods when the underlying index is both below its long-term trend and experiencing elevated volatility.
+
+\subsection{Signal Architecture}
+
+The entry/exit signal combines two independent filters evaluated on every Friday close:
+
+\subsubsection{Primary Signal: 200-Day SMA Crossover}
+
+\begin{equation}
+\text{SMA signal} =
+\begin{cases}
+\text{RISK\_ON} & \text{if } P_{\text{ref}} > \text{SMA}_{200}(P_{\text{ref}}) \\
+\text{RISK\_OFF} & \text{otherwise}
+\end{cases}
+\end{equation}
+
+where $P_{\text{ref}}$ is the daily close of the unleveraged reference index (QQQ for Nasdaq-tracking funds, SPY for S\&P-tracking funds). The 200-day SMA is the most widely studied trend indicator, with extensive evidence of efficacy from 1929--2019 across all rolling 25-year periods \cite{bogleheads_sma200}.
+
+The optimal SMA length lies in the 180--270 day range, with 200 and 235 producing comparable results. We default to 200 for simplicity and convention.
+
+\subsubsection{Volatility Regime Filter}
+
+\begin{equation}
+\text{Vol filter} =
+\begin{cases}
+\text{PASS} & \text{if } \sigma_{\text{ref}}^{(20)} < 0.20 \\
+\text{FAIL (exit)} & \text{otherwise}
+\end{cases}
+\end{equation}
+
+where $\sigma_{\text{ref}}^{(20)}$ is the 20-day rolling annualised realised volatility of the reference index. When reference volatility exceeds 20\%, the signal overrides to RISK\_OFF regardless of the SMA signal.
+
+This filter is the key innovation over standard SMA-only approaches. It removes exposure during high-volatility regimes (choppy markets, sell-offs) where daily rebalancing decay is most damaging to leveraged ETFs. The 20\% threshold was selected as approximately the 75th percentile of QQQ's realised volatility distribution.
+
+\subsubsection{Combined Signal}
+
+\begin{equation}
+\text{Signal} =
+\begin{cases}
+\text{RISK\_ON (invest)} & \text{if SMA signal = RISK\_ON} \wedge \text{Vol filter = PASS} \\
+\text{RISK\_OFF (cash)} & \text{otherwise}
+\end{cases}
+\end{equation}
+
+The combined signal is conservative on entry (both conditions must hold) and fast on exit (either condition triggers exit). This asymmetry is intentional: in leveraged instruments, avoiding large losses is more valuable than capturing marginal gains.
+
+\subsection{Position Sizing: Volatility Targeting}
+
+When the signal is RISK\_ON, the allocation is optionally scaled by the ratio of a target volatility to the realised volatility of the leveraged ETF itself:
+
+\begin{equation}
+\text{allocation} = \min\left(1.0, \; \frac{\sigma_{\text{target}}}{\sigma_{\text{equity}}^{(60)}}\right)
+\end{equation}
+
+where $\sigma_{\text{equity}}^{(60)}$ is the 60-day rolling annualised volatility of the leveraged ETF (e.g.\ QLD) and $\sigma_{\text{target}} = 35\%$ (calibrated to approximate the long-run vol of QLD in calm markets).
+
+This sizing mechanism automatically reduces exposure during volatile periods even when the trend and vol-filter signals remain positive. In practice, it reduces maximum drawdown by 1--2 percentage points at a cost of approximately 3 percentage points of CAGR.
+
+\subsection{Cash Ratchet}
+
+After each monthly rebalance, the strategy extracts 25\% of gains above the high-water mark to a locked cash reserve:
+
+\begin{equation}
+\text{If } V_t > \text{HWM}: \quad
+\begin{cases}
+\text{extract} = 0.25 \times (V_t - \text{HWM}) \\
+\text{reserve}_{t} = \text{reserve}_{t-1} + \text{extract} \\
+\text{HWM}_{t} = V_t - \text{extract}
+\end{cases}
+\end{equation}
+
+The cash reserve is \emph{never reinvested} and grows monotonically. This mechanism sacrifices compound growth in exchange for a guaranteed minimum return floor. Over the 5-year backtest, the ratchet extracts \$341,078 for QLD, providing a permanent safety net.
+
+\subsection{Design Decisions Based on Empirical Evidence}
+
+Several initially attractive features were tested and found to be counterproductive for leveraged ETFs:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lll}
+\toprule
+\textbf{Feature} & \textbf{Finding} & \textbf{Reason} \\
+\midrule
+15\% trailing stop & Counterproductive & 5\% index move triggers exit; whipsaw \\
+Bond allocation (55/45) & Severe drag & TLT lost 27.5\% (2021--26 rate cycle) \\
+Dual momentum + SMA & Too conservative & 252-day lookback wasted first year \\
+Stop loss (any) & Not needed & SMA crossing is the exit signal \\
+Re-entry at half size & Unnecessary & Only relevant when stops are active \\
+\bottomrule
+\end{tabular}
+\caption{Features Tested and Rejected}
+\end{table}
+
+\textbf{Trailing stops} were found to be particularly destructive. A 15\% trailing stop on a 2x or 3x ETF triggers on a routine 5--7.5\% move in the underlying index, which occurs every 2--3 weeks in normal markets. This causes a death spiral of enter-stop-enter-stop, bleeding transaction costs. The SMA 200 crossing provides a more robust, lower-frequency exit signal.
+
+\textbf{Bond allocation} (the HFEA 55/45 approach) was rejected because the 2021--2026 period was the worst bond market in decades. TLT lost 27.5\%, meaning 45\% of the portfolio was invested in a structurally declining asset. Academic evidence supports equity-only allocation with SMA timing as the superior approach for leveraged ETF strategies \cite{bogleheads_sma200, quantified_strategies}.
+
+%% ============================================================
+\section{Backtest Results}
+%% ============================================================
+
+\subsection{Multi-ETF Comparison: Strategy vs Buy-and-Hold}
+
+With the expanded 17-ETF universe, the top performers show dramatic improvement over buy-and-hold:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lrrrrr}
+\toprule
+\textbf{ETF} & \textbf{Strategy CAGR} & \textbf{B\&H CAGR} & \textbf{$\Delta$CAGR} & \textbf{$\Delta$DD} & \textbf{$\Delta$Sharpe} \\
+\midrule
+\rowcolor{green!10} TECL (3x Tech) & \textbf{38.3\%} & 19.7\% & +18.6pp & +44.1pp & +0.41 \\
+\rowcolor{green!10} ROM (2x Tech) & \textbf{26.8\%} & 16.5\% & +10.3pp & +44.5pp & +0.47 \\
+TQQQ (3x Nasdaq) & 26.5\% & 14.1\% & +12.4pp & +48.4pp & +0.31 \\
+QLD (2x Nasdaq) & 19.3\% & 16.2\% & +3.0pp & +41.1pp & +0.30 \\
+NAIL (3x Homes) & 18.5\% & 4.3\% & +14.2pp & +48.7pp & +0.20 \\
+DUSL (3x Indust) & 22.6\% & 29.6\% & -7.0pp & +21.1pp & -0.03 \\
+LABU (3x Biotech) & 11.3\% & -28.3\% & +39.6pp & +39.1pp & +0.88 \\
+UPRO (3x S\&P) & 11.1\% & 22.2\% & -11.1pp & +33.6pp & -0.14 \\
+\bottomrule
+\end{tabular}
+\caption{Strategy vs Buy-and-Hold: Top 8 Leveraged ETFs}
+\end{table}
+
+\subsubsection{Key Observations}
+
+\begin{itemize}[noitemsep]
+    \item \textbf{Technology-tracking ETFs (TECL, ROM) are the strongest performers}, benefiting from XLK's cleaner trends and a well-calibrated 22\% vol threshold. TECL achieves a 1.00 Sharpe ratio --- exceptional for a leveraged ETF.
+    \item \textbf{Timing adds 30--50 percentage points of drawdown reduction across all ETFs}, even those where it reduces CAGR. This confirms that the SMA + vol-filter approach provides genuine risk management.
+    \item \textbf{S\&P-tracking ETFs (UPRO, SPXL) sacrifice CAGR for risk management.} The S\&P 500's 2022 drawdown was shallower and recovery faster, creating timing opportunity cost. With the optimised 15\% vol threshold (vs 20\% for QQQ), this gap narrows.
+    \item \textbf{LABU (3x Biotech) demonstrates the strategy's downside protection.} Buy-and-hold LABU lost -28.3\% annually; the strategy preserved capital with +11.3\% CAGR.
+    \item \textbf{Rebalancing frequency is low}: approximately 15--17 trades per ETF per year, composed of monthly allocation adjustments plus signal transitions ($\sim$32--57 signal changes over 5 years).
+\end{itemize}
+
+\subsection{Volatility Regime Filter Impact}
+
+The vol filter is the single most impactful risk-mitigation feature. With the expanded universe, we found that the \textbf{optimal threshold varies by reference index}:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{llrl}
+\toprule
+\textbf{Reference} & \textbf{Optimal Threshold} & \textbf{$\Delta$Sharpe vs SMA-only} & \textbf{Reason} \\
+\midrule
+SPY & 15\% & +0.06 & Lower base vol; stricter filter needed \\
+QQQ & 20\% & +0.18 & Standard tech vol threshold \\
+XLK, XLF, ITB, IWM & 22\% & +0.13--0.32 & Sector-level vol runs higher \\
+XBI & 25\% & +0.43 & Biotech is structurally volatile \\
+SMH, XLI & 0\% (none) & --- & Binary trending; filter hurts \\
+\bottomrule
+\end{tabular}
+\caption{Optimal Vol-Filter Threshold by Reference Index}
+\end{table}
+
+The intuition: lower-volatility reference indices (SPY) require a tighter threshold because ``elevated'' vol starts at a lower level. Higher-volatility sectors (XBI) need a looser threshold to avoid being perpetually risk-off. For SMH and XLI, the vol filter is counterproductive because these sectors tend to either trend strongly (invest) or collapse (the SMA handles exit alone).
+
+For the recommended TECL (XLK reference, 22\% threshold): the vol filter simultaneously \emph{increases} CAGR and \emph{reduces} drawdown relative to SMA-only, by removing exposure during high-volatility regimes where leveraged ETF volatility decay is most severe.
+
+\subsection{Vol-Sizing Sensitivity Analysis}
+
+Volatility-targeted position sizing scales exposure inversely with realised ETF volatility. The target vol parameter controls how aggressively the sizing reduces exposure:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{rrrrrr}
+\toprule
+\textbf{Target Vol} & \textbf{Avg Alloc} & \textbf{CAGR} & \textbf{Sharpe} & \textbf{Max DD} & \textbf{Calmar} \\
+\midrule
+No sizing & 59\% & 16.7\% & 0.63 & -29.6\% & 0.57 \\
+20\% & 34\% & 9.6\% & 0.53 & -17.4\% & 0.55 \\
+25\% & 43\% & 11.7\% & 0.56 & -21.5\% & 0.54 \\
+30\% & 50\% & 13.2\% & 0.56 & -25.3\% & 0.52 \\
+\rowcolor{green!10} 35\% & 55\% & 14.5\% & 0.58 & -26.9\% & 0.54 \\
+40\% & 56\% & 15.0\% & 0.59 & -28.7\% & 0.52 \\
+50\% & 58\% & 15.8\% & 0.61 & -29.6\% & 0.53 \\
+\bottomrule
+\end{tabular}
+\caption{QLD Vol-Sizing Sensitivity (SMA 200 only, no vol filter)}
+\end{table}
+
+At 35\% target vol, the strategy deploys 55\% of capital on average (vs 59\% without sizing), reducing max drawdown by 2.7pp at a cost of 2.2pp CAGR. The Calmar ratio is roughly constant across the range, indicating that vol-sizing trades return for risk proportionally.
+
+For the more volatile SOXL (3x Semiconductors), vol-sizing is transformative: target vol of 40\% reduces max drawdown from -73.9\% to -40.2\% while maintaining 15.9\% CAGR.
+
+%% ============================================================
+\section{Diversification and Concentration}
+%% ============================================================
+
+\subsection{Cross-Strategy Correlation}
+
+A key advantage of the expanded universe is that leveraged ETFs in different sectors have low correlation \emph{after} the timing strategy is applied. The vol filter independently reduces exposure during each reference index's volatile periods, creating idiosyncratic risk-on/risk-off patterns:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lrrrrr}
+\toprule
+ & \textbf{TQQQ} & \textbf{TECL} & \textbf{NAIL} & \textbf{FAS} & \textbf{LABU} \\
+\midrule
+TQQQ & 1.00 & 0.83 & 0.13 & 0.29 & 0.24 \\
+TECL & 0.83 & 1.00 & 0.09 & 0.23 & 0.19 \\
+NAIL & 0.13 & 0.09 & 1.00 & 0.11 & 0.09 \\
+FAS  & 0.29 & 0.23 & 0.11 & 1.00 & 0.20 \\
+LABU & 0.24 & 0.19 & 0.09 & 0.20 & 1.00 \\
+\bottomrule
+\end{tabular}
+\caption{Daily Return Correlation Between Strategy Equity Curves}
+\end{table}
+
+\textbf{NAIL (3x Homebuilders) is the best diversifier}: its correlation with TQQQ is only 0.13 and with TECL is 0.09. This is because ITB (the homebuilder reference index) has very different drivers than technology---interest rates, housing starts, construction permits. FAS (3x Financials) and LABU (3x Biotech) also provide genuine diversification.
+
+\subsection{Recommended Portfolios}
+
+Based on the Sharpe ratio, drawdown, correlation, and sector concentration analysis:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lrrrrr}
+\toprule
+\textbf{Portfolio} & \textbf{CAGR} & \textbf{Sharpe} & \textbf{Max DD} & \textbf{Max Sector} & \textbf{Avg Corr} \\
+\midrule
+\rowcolor{green!10} \textbf{TECL + NAIL} & \textbf{31.4\%} & \textbf{1.15} & -24.1\% & 50\% & \textbf{0.09} \\
+\rowcolor{yellow!20} TECL + NAIL + FAS & 23.9\% & 0.98 & \textbf{-19.4\%} & \textbf{33\%} & 0.14 \\
+ROM + NAIL + UYG (2x) & 18.9\% & 0.99 & -15.7\% & 33\% & --- \\
+5-sector spread & 22.9\% & 0.98 & -20.7\% & 20\% & 0.23 \\
+\bottomrule
+\end{tabular}
+\caption{Recommended Portfolio Options}
+\end{table}
+
+\begin{itemize}[noitemsep]
+    \item \textbf{Aggressive}: TECL + NAIL (50/50). Highest Sharpe (1.15) with near-zero correlation. Concentration risk: 50\% Technology, 50\% Homebuilders.
+    \item \textbf{Balanced}: TECL + NAIL + FAS (33/33/33). Adds Financials for diversification. Max DD drops to -19.4\% with 0.98 Sharpe. Three distinct sectors.
+    \item \textbf{Conservative (2x only)}: ROM + NAIL + UYG. Lower leverage (2x) with 18.9\% CAGR, 0.99 Sharpe, and only -15.7\% max drawdown.
+    \item \textbf{Diversified}: TECL + NAIL + FAS + DUSL + LABU (20\% each). Five sectors, 20\% max concentration, 22.9\% CAGR, 0.98 Sharpe.
+\end{itemize}
+
+\subsection{Concentration Risk}
+
+The primary concentration concern is \textbf{Technology overlap}: TQQQ (Nasdaq 100) and TECL (XLK) are 83\% correlated because the Nasdaq 100 is heavily weighted toward the same technology companies that dominate XLK. Including both in a portfolio provides no diversification benefit. \textbf{Recommendation}: choose one of TQQQ/TECL (or QLD/ROM), not both.
+
+The recommended TECL + NAIL portfolio has exactly two sector exposures (Technology 50\%, Homebuilders 50\%). While this appears concentrated, the strategies are nearly independent ($\rho = 0.09$), so a drawdown in one is unlikely to coincide with a drawdown in the other.
+
+\subsection{Rebalancing Frequency}
+
+Each individual ETF strategy rebalances approximately 15--17 times per year:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lrrr}
+\toprule
+\textbf{ETF} & \textbf{Trades/Year} & \textbf{Signal Transitions} & \textbf{Avg Days Between} \\
+\midrule
+TQQQ & 14.7 & 36 & 25 \\
+TECL & 17.1 & 43 & 21 \\
+NAIL & 16.5 & 57 & 22 \\
+FAS  & 15.1 & 39 & 24 \\
+DUSL & 14.5 & 32 & 25 \\
+\bottomrule
+\end{tabular}
+\caption{Rebalancing Frequency Per ETF (5-year period)}
+\end{table}
+
+This is a low-frequency strategy. Most trades are monthly allocation adjustments; the remainder are signal transitions (entry/exit). For a two-ETF portfolio, total trading activity is approximately 30--35 trades per year --- roughly one every 7--8 business days.
+
+%% ============================================================
+\section{Stop Loss Analysis}
+%% ============================================================
+
+\subsection{Why Trailing Stops Fail for Leveraged ETFs}
+
+A trailing stop loss at level $s$ on a leveraged ETF with leverage factor $L$ triggers when the underlying index declines by $s/L$:
+
+\begin{equation}
+\text{Underlying move to trigger stop} \approx \frac{s}{L}
+\end{equation}
+
+For a 15\% stop on a 2x fund, this is a 7.5\% index move. Given that QQQ's daily standard deviation is approximately 1.4\% (annualised 22\%), a 7.5\% decline represents a $7.5/1.4 \approx 5.4\sigma$ event on a single day but only a $\sim$1.5$\sigma$ event over a 10-trading-day window. Such moves are routine, occurring multiple times per year.
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{rrrrrr}
+\toprule
+\textbf{Stop Level} & \textbf{CAGR} & \textbf{Sharpe} & \textbf{Max DD} & \textbf{Calmar} & \textbf{Stop Events} \\
+\midrule
+10\% & 4.3\% & 0.23 & -22.4\% & 0.19 & 21 \\
+15\% & 6.0\% & 0.32 & -29.6\% & 0.20 & 9 \\
+20\% & 4.7\% & 0.24 & -36.0\% & 0.13 & 2 \\
+25\% & 4.4\% & 0.22 & -33.2\% & 0.13 & 2 \\
+30\% & 4.8\% & 0.24 & -35.5\% & 0.14 & 1 \\
+\rowcolor{green!10} No stop & \textbf{6.2\%} & \textbf{0.31} & -35.5\% & \textbf{0.17} & 0 \\
+\bottomrule
+\end{tabular}
+\caption{Trailing Stop Sensitivity --- SPXL/TLT 55/45, SMA Timing (Original Config)}
+\end{table}
+
+In every case, the no-stop configuration outperforms or equals the stopped configurations. Tighter stops generate more stop events, each incurring transaction costs and missed recovery. The 10\% stop triggered 21 times over 5 years --- approximately once per quarter --- each time selling at a local low and buying back higher.
+
+\textbf{Recommendation}: Do not use trailing stops on leveraged ETFs. The SMA 200 crossover provides a more effective, lower-frequency exit signal that avoids whipsaw losses.
+
+%% ============================================================
+\section{Bond Allocation Analysis}
+%% ============================================================
+
+The original HFEA (Hedgefundie's Excellent Adventure) strategy allocates 55\% to leveraged equities and 45\% to leveraged bonds (TMF, 3x Treasuries). This allocation was tested with unleveraged bonds (TLT) due to data availability:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{rrrrrr}
+\toprule
+\textbf{Equity \%} & \textbf{Bond \%} & \textbf{CAGR} & \textbf{Sharpe} & \textbf{Max DD} & \textbf{Calmar} \\
+\midrule
+\rowcolor{green!10} 100\% & 0\% & \textbf{14.2\%} & \textbf{0.52} & -40.0\% & \textbf{0.35} \\
+80\% & 20\% & 10.8\% & 0.45 & -37.4\% & 0.29 \\
+70\% & 30\% & 9.0\% & 0.41 & -36.6\% & 0.25 \\
+55\% & 45\% & 6.2\% & 0.31 & -35.5\% & 0.17 \\
+40\% & 60\% & 3.3\% & 0.16 & -34.6\% & 0.09 \\
+\bottomrule
+\end{tabular}
+\caption{Equity/Bond Split Sensitivity --- SPXL with SMA Timing, No Stops}
+\end{table}
+
+Over this period, \textbf{every percentage point allocated to bonds reduced returns without meaningfully reducing risk}. TLT lost 27.5\% from February 2021 to February 2026, the worst 5-year period for long-duration bonds since the early 1980s. The bond allocation dragged CAGR from 14.2\% (100\% equity) to 6.2\% (55/45 split) while reducing max drawdown by only 4.5 percentage points.
+
+\textbf{Period Dependence}: The HFEA bond allocation may still have value over longer time horizons that include periods of falling interest rates, where bonds rally and provide crisis hedging. However, with interest rates elevated relative to the 2010--2020 decade, the structural tailwind for long-duration bonds has weakened.
+
+%% ============================================================
+\section{Comparison with Published Research}
+%% ============================================================
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{llrrrr}
+\toprule
+\textbf{Strategy} & \textbf{Period} & \textbf{CAGR} & \textbf{Max DD} & \textbf{Sharpe} & \textbf{Source} \\
+\midrule
+HFEA 55/45 (static) & 2009--2025 & 11--15\% & -71\% & Bottom 25\% & PortfoliosLab \\
+TQQQ buy-and-hold & 2010--2025 & $\sim$36\% & -82\% & 0.54 & FinanceCharts \\
+TQQQ + SMA 200 (cash) & 2010--2025 & 24--30\% & -26--53\% & $\sim$1.5 & QuantConnect \\
+TQQQ/TMF + crash filter & 2010--2025 & $\sim$24\% & -39\% & 0.95 & Quantified Strats \\
+\midrule
+\rowcolor{green!10} \textbf{Our QLD + SMA + vol filter} & \textbf{2021--2026} & \textbf{19.3\%} & \textbf{-22.6\%} & \textbf{0.81} & \textbf{This document} \\
+\rowcolor{green!10} \textbf{Our SOXL + full strategy} & \textbf{2021--2026} & \textbf{16.8\%} & \textbf{-30.8\%} & \textbf{0.70} & \textbf{This document} \\
+\bottomrule
+\end{tabular}
+\caption{Comparison with Published Leveraged ETF Strategies}
+\end{table}
+
+Our results are broadly consistent with published research, with several caveats:
+
+\begin{itemize}[noitemsep]
+    \item Our backtest period (2021--2026) includes the severe 2022 drawdown but misses the 2010--2020 bull market that inflates long-term CAGR figures in published work.
+    \item We test 2x funds (QLD, SSO) rather than 3x (TQQQ, UPRO) due to data availability. 3x funds should produce higher CAGR with proportionally higher risk.
+    \item The vol-filter innovation is not widely documented in the HFEA/leveraged ETF literature and appears to be a genuine improvement over SMA-only approaches.
+    \item SMA 200 timing on the reference index, rather than on the leveraged ETF itself, is confirmed as the correct approach --- consistent with Bogleheads consensus.
+\end{itemize}
+
+%% ============================================================
+\section{VIX Integration Analysis}
+%% ============================================================
+
+The CBOE Volatility Index (VIX) is often cited as a timing signal for leveraged ETF strategies. As a forward-looking measure of implied volatility derived from S\&P 500 options prices, VIX theoretically provides information that backward-looking realised volatility cannot. This section documents a comprehensive investigation of VIX integration.
+
+\subsection{Literature Review}
+
+VIX-based timing for leveraged ETFs appears in several published strategies:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lll}
+\toprule
+\textbf{Strategy} & \textbf{VIX Usage} & \textbf{Source} \\
+\midrule
+Alvarez UPRO/TQQQ & VIX $\leq$ 25 (one of four rules) & \cite{alvarez} \\
+QuantPedia Vol Filter & VIX MA(10) vs realised vol & \cite{quantpedia_vol} \\
+Moreira \& Muir (2017) & VIX-scaled position sizing & \cite{moreira_muir} \\
+HFEA + Vol Targeting & VIX bands (12/20/32) & Bogleheads \\
+Aptus IVTS & VIX/VIX3M ratio $>$ 1 & \cite{aptus} \\
+\bottomrule
+\end{tabular}
+\caption{VIX Usage in Published Leveraged ETF Strategies}
+\end{table}
+
+The academic evidence (Moreira \& Muir, 2017) finds that VIX-managed portfolios produce significant alphas, with VIX outperforming realised volatility \emph{after transaction costs} due to more stable portfolio weights and lower turnover.
+
+\subsection{Empirical Correlation with Realised Volatility}
+
+We computed the correlation between VIX and QQQ 20-day realised volatility over the February 2021 -- February 2026 period:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lr}
+\toprule
+\textbf{Relationship} & \textbf{Correlation} \\
+\midrule
+VIX vs QQQ 20-day realised vol (same day) & 0.696 \\
+VIX today vs QQQ realised vol in 1 day & 0.717 \\
+VIX today vs QQQ realised vol in 3 days & 0.754 \\
+VIX today vs QQQ realised vol in 5 days & \textbf{0.771} \\
+VIX today vs QQQ realised vol in 10 days & 0.768 \\
+\midrule
+\multicolumn{2}{l}{\textit{Disagreement analysis (VIX $>$ 20 vs ref\_vol $>$ 20\%):}} \\
+Agreement rate & 79.1\% \\
+VIX high, ref\_vol low (VIX ``false alarm'') & 6.5\% \\
+VIX low, ref\_vol high (VIX ``missed'') & 14.4\% \\
+\bottomrule
+\end{tabular}
+\caption{VIX vs QQQ Realised Volatility Correlation}
+\end{table}
+
+VIX and 20-day realised volatility are \textbf{70\% correlated}, confirming substantial information overlap. VIX is a better predictor of \emph{future} realised volatility ($\rho = 0.77$ at 5-day lead), but this advantage is already captured by the rolling 20-day window which incorporates the future vol as it realises. The 21\% disagreement rate is dominated by cases where ref\_vol is high but VIX is low (14.4\%), which are exactly the cases where our existing filter correctly exits.
+
+\subsection{Backtest Results: VIX Signal Approaches}
+
+We tested 19 VIX-based approaches against the baseline (SMA 200 + ref\_vol $<$ 20\%). The top results for QLD:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lrrrrr}
+\toprule
+\textbf{Approach} & \textbf{CAGR} & \textbf{Sharpe} & \textbf{Max DD} & \textbf{Calmar} & \textbf{Time In} \\
+\midrule
+\rowcolor{green!10} \textbf{SMA + ref\_vol $<$ 20\% (baseline)} & \textbf{19.3\%} & \textbf{0.81} & \textbf{-22.6\%} & \textbf{0.85} & \textbf{55\%} \\
+SMA + ref\_vol$<$20\% + VIX$<$25 & 17.5\% & 0.75 & -22.6\% & 0.78 & 54\% \\
+SMA + VIX $>$ ref\_vol (QuantPedia) & 12.9\% & 0.71 & -18.2\% & 0.71 & 30\% \\
+SMA + composite($\alpha$=0.7, $t$=20\%) & 15.9\% & 0.68 & -25.8\% & 0.62 & 57\% \\
+SMA only (no vol filter) & 16.7\% & 0.63 & -29.6\% & 0.57 & 72\% \\
+SMA + VIX $<$ 25 & 14.1\% & 0.55 & -31.3\% & 0.45 & 71\% \\
+SMA + VIX $<$ 20 & -3.5\% & -0.11 & -43.0\% & -0.08 & 62\% \\
+\bottomrule
+\end{tabular}
+\caption{QLD: VIX Signal Approaches vs Baseline}
+\end{table}
+
+\textbf{No VIX-based approach outperforms the existing ref\_vol $<$ 20\% filter.} The best VIX approach (ref\_vol + VIX $<$ 25) achieves 0.75 Sharpe vs 0.81 for the baseline. The QuantPedia approach (invest when VIX $>$ realised vol, signalling the market is ``over-insured'') achieves low drawdown (-18.2\%) but low CAGR (12.9\%) due to being in the market only 30\% of the time.
+
+\subsection{VIX Position Sizing}
+
+We also tested VIX as a position-sizing input rather than a binary filter:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lrrrr}
+\toprule
+\textbf{Sizing Approach} & \textbf{CAGR} & \textbf{Sharpe} & \textbf{Max DD} & \textbf{Avg Alloc} \\
+\midrule
+\rowcolor{green!10} \textbf{No sizing (100\% when risk-on)} & \textbf{19.3\%} & \textbf{0.81} & \textbf{-22.6\%} & \textbf{100\%} \\
+VIX vol-target (35\%/VIX) & 19.3\% & 0.81 & -22.6\% & 100\% \\
+70\% VIX + 30\% equity vol blend & 19.1\% & 0.81 & -22.6\% & 100\% \\
+VIX-scaled (20/VIX, cap 1.0) & 18.2\% & 0.78 & -22.8\% & 99\% \\
+Equity vol-target (35\%) & 16.5\% & 0.73 & -22.6\% & 95\% \\
+VIX regime bands (18/22/28) & 15.9\% & 0.72 & -20.9\% & 94\% \\
+\bottomrule
+\end{tabular}
+\caption{QLD: VIX Position Sizing (with SMA + ref\_vol$<$20\% filter)}
+\end{table}
+
+VIX vol-targeting exactly matches the baseline because VIX is typically below 35\% when ref\_vol $<$ 20\%, so the scaler is always 1.0. The VIX regime-band approach achieves the best max drawdown (-20.9\%) but at a 3.4pp CAGR cost. Equity vol-targeting at 35\% (our Config D) produces a moderate trade-off.
+
+\subsection{Why VIX Adds Little Over Realised Volatility}
+
+Three factors explain why VIX does not improve the strategy:
+
+\begin{enumerate}[noitemsep]
+\item \textbf{High correlation}: At $\rho = 0.70$, VIX and ref\_vol share most of their information content. Adding VIX to a filter already using ref\_vol provides marginal additional signal.
+
+\item \textbf{Rolling window captures VIX's predictive power}: VIX's advantage is predicting \emph{future} realised vol ($\rho = 0.77$ at 5-day lead). But our 20-day rolling window naturally incorporates this future vol as it realises, so the information arrives within a few days.
+
+\item \textbf{VIX ``false alarms'' hurt}: VIX exceeds 20 while ref\_vol stays below 20\% approximately 6.5\% of the time. These are typically brief spikes (e.g.\ FOMC days, earnings) that resolve quickly. Exiting on VIX alone during these events causes unnecessary trading and missed returns.
+\end{enumerate}
+
+\subsection{VIX Integration: Implementation and Recommendation}
+
+Despite the current-period results, VIX has been implemented as an \textbf{optional parameter} in the strategy for three reasons:
+
+\begin{itemize}[noitemsep]
+\item \textbf{Longer backtests may differ}: The 2021--2026 sample is short. Over a 15-year period (2010--2026), VIX may add value during different market regimes (e.g.\ the 2020 COVID crash where VIX spiked to 82).
+\item \textbf{Forward-looking information}: In a flash-crash scenario where VIX spikes before realised vol catches up, a VIX emergency exit at $>$35 provides a ``circuit breaker'' at minimal cost (it did not trigger in our sample).
+\item \textbf{SSO marginal improvement}: For SSO (2x S\&P), a 30\% VIX composite improves Sharpe from 0.37 to 0.39 --- marginal but positive.
+\end{itemize}
+
+The implementation supports three VIX integration modes:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lll}
+\toprule
+\textbf{Parameter} & \textbf{Description} & \textbf{Default} \\
+\midrule
+\texttt{vix\_weight} & Blend weight in composite vol & 0.0 (disabled) \\
+\texttt{vix\_exit\_threshold} & Emergency VIX exit level & 0.0 (disabled) \\
+\bottomrule
+\end{tabular}
+\caption{VIX Configuration Parameters}
+\end{table}
+
+\textbf{Recommendation}: Keep VIX disabled for QLD (Config C remains optimal). Enable VIX emergency exit at $>$35 as a zero-cost ``circuit breaker'' for tail-risk protection. Re-evaluate once 15-year TQQQ backtest data is available.
+
+%% ============================================================
+\section{Risk Framework}
+%% ============================================================
+
+\subsection{Layered Risk Management}
+
+The strategy employs a layered approach to risk, with each layer addressing a different failure mode:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{rllr}
+\toprule
+\textbf{Layer} & \textbf{Mechanism} & \textbf{Protects Against} & \textbf{DD Reduction} \\
+\midrule
+1 & SMA 200 trend filter & Major drawdowns, bear markets & $\sim$34pp \\
+2 & Vol regime filter (20\%) & Choppy markets, volatility decay & $\sim$7pp \\
+3 & Vol-targeted sizing (35\%) & Elevated volatility regimes & $\sim$2pp \\
+4 & Cash ratchet (25\%) & Giving back accumulated gains & $\sim$1pp \\
+\bottomrule
+\end{tabular}
+\caption{Risk Layers and Their Contribution --- QLD Drawdown Reduction vs Buy-and-Hold}
+\end{table}
+
+\subsection{Maximum Loss Analysis}
+
+In the worst case (sudden crash before any signal triggers):
+\begin{itemize}[noitemsep]
+    \item \textbf{Standalone strategy}: Maximum single-event loss equals the gap between current price and the nearest exit signal (typically 10--15\% for SMA crossover).
+    \item \textbf{As 20\% portfolio allocation}: Maximum portfolio-level loss $\approx 0.20 \times 0.15 = 3\%$.
+    \item \textbf{With vol sizing at 35\%}: Allocation is typically 50--60\% of maximum, so effective portfolio loss $\approx 0.20 \times 0.55 \times 0.15 = 1.7\%$.
+\end{itemize}
+
+\subsection{Portfolio Integration}
+
+This strategy is designed as an independent alpha source within a broader portfolio:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{llr}
+\toprule
+\textbf{Strategy} & \textbf{Role} & \textbf{Allocation} \\
+\midrule
+Multi-Factor ETF (beta) & Core portfolio & 80\% \\
+\rowcolor{green!10} Leveraged Momentum (alpha) & Trend-following overlay & 20\% \\
+FX Options (alpha) & Volatility/skew alpha & Separate \\
+\bottomrule
+\end{tabular}
+\caption{Portfolio Structure}
+\end{table}
+
+With a 20\% allocation and the full strategy (Config E), the leveraged momentum component contributes approximately $0.20 \times 15.6\% = 3.1\%$ CAGR to the overall portfolio while the vol-sizing limits maximum drawdown contribution to $<$5\%.
+
+%% ============================================================
+\section{Implementation}
+%% ============================================================
+
+\subsection{Module Structure}
+
+\begin{lstlisting}
+src/leveraged/
+    __init__.py          # Package init
+    signals.py           # SMA, momentum, vol filter signals
+    strategy.py          # Allocation, rebalancing, ratchet
+    backtest.py          # Backtest engine and metrics
+    universe.py          # ETF pair definitions, data loading
+\end{lstlisting}
+
+\subsection{Key Parameters}
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{llr}
+\toprule
+\textbf{Parameter} & \textbf{Description} & \textbf{Default} \\
+\midrule
+\texttt{sma\_period} & SMA period for trend signal & 200 \\
+\texttt{signal\_mode} & Signal type & \texttt{sma\_only} \\
+\texttt{vol\_filter\_threshold} & Ref vol threshold for exit & 0.20 \\
+\texttt{vol\_filter\_lookback} & Rolling window for vol filter & 20 days \\
+\texttt{target\_vol} & Target vol for position sizing & 0.35 \\
+\texttt{ratchet\_pct} & Fraction of gains to extract & 0.25 \\
+\texttt{equity\_split} & Equity allocation & 1.0 \\
+\texttt{bond\_split} & Bond allocation & 0.0 \\
+\texttt{spread\_bps} & Transaction cost estimate & 5 bps \\
+\texttt{vix\_weight} & VIX blend in composite vol & 0.0 \\
+\texttt{vix\_exit\_threshold} & Emergency VIX exit & 0.0 \\
+\bottomrule
+\end{tabular}
+\caption{Strategy Configuration Parameters}
+\end{table}
+
+\subsection{Rebalancing Logic}
+
+Signals are evaluated on every Friday close. Rebalancing occurs when:
+\begin{itemize}[noitemsep]
+    \item The signal state changes (risk-on $\leftrightarrow$ risk-off), or
+    \item A new calendar month begins (monthly rebalance for position sizing updates).
+\end{itemize}
+
+Transaction costs are modelled at 5 basis points per trade (wider than typical ETF spreads to account for leveraged ETF bid-ask spreads and market impact).
+
+%% ============================================================
+\section{Limitations and Future Work}
+%% ============================================================
+
+\subsection{Current Limitations}
+
+\begin{enumerate}[noitemsep]
+    \item \textbf{Short backtest period}: 5 years (2021--2026) includes one major drawdown but does not span multiple interest rate cycles. The strategy should be validated on longer data (2010--2026) using synthetic leveraged returns.
+    \item \textbf{Sector concentration in top picks}: TECL + NAIL is only two sectors. A flash in either Technology or Homebuilders could cause correlated losses despite the low historical correlation.
+    \item \textbf{S\&P timing underperformance}: SMA 200 timing on SPY underperforms buy-and-hold for S\&P-tracking funds in this period. The 15\% vol threshold partially addresses this but doesn't fully close the gap.
+    \item \textbf{Cash earns nothing}: When in risk-off mode ($\sim$46--65\% of the time depending on the ETF), the strategy holds cash. Rotating into short-term bond ETFs (SGOV, BIL) during risk-off periods could add 1--3\% annually.
+    \item \textbf{Threshold overfitting risk}: The reference-specific vol thresholds (15\%--25\%) were optimised in-sample. Out-of-sample validation is needed.
+    \item \textbf{VIX adds no value}: Despite strong theoretical motivation, VIX is 70\% correlated with ref\_vol and doesn't improve any metric for QQQ/XLK-referenced ETFs (see Section 6).
+\end{enumerate}
+
+\subsection{Planned Enhancements}
+
+\begin{enumerate}[noitemsep]
+    \item Extend backtest to 2010--2026 using synthetic leveraged returns from underlying index data $\times$ leverage factor.
+    \item Add risk-off allocation to SGOV or BIL to earn yield when not in leveraged positions.
+    \item Validate reference-specific vol thresholds out-of-sample using walk-forward analysis.
+    \item Implement live monitoring and automated execution via IB Gateway.
+    \item Test adaptive vol-filter thresholds based on rolling percentiles (regime-adaptive).
+    \item Investigate adding a third independent sector to the TECL+NAIL portfolio for further diversification.
+\end{enumerate}
+
+%% ============================================================
+\section{Conclusion}
+%% ============================================================
+
+The leveraged ETF momentum strategy demonstrates that \textbf{simple trend-following with a volatility-regime filter can substantially improve the risk-adjusted returns} of leveraged equity ETFs. The Version 3.0 expansion from 2 to 17 ETFs across 8 sectors reveals three key insights:
+
+\begin{enumerate}[noitemsep]
+    \item \textbf{Technology-tracking ETFs (TECL, ROM) are the strongest performers.} TECL achieves 38.3\% CAGR with a 1.00 Sharpe ratio --- the highest single-ETF Sharpe in the universe.
+    \item \textbf{Cross-sector diversification dramatically improves risk-adjusted returns.} The TECL + NAIL portfolio achieves a 1.15 Sharpe ratio --- 40\% higher than TQQQ alone --- by exploiting a 0.09 correlation between Technology and Homebuilder strategies.
+    \item \textbf{Reference-specific vol-filter calibration is essential.} The optimal threshold varies from 15\% (SPY) to 25\% (XBI), with some sectors (SMH, XLI) performing best with no vol filter at all.
+\end{enumerate}
+
+The core principle remains: leveraged ETFs are best held during \textbf{calm uptrends} and exited to cash otherwise. Combining this with cross-sector diversification achieves returns that exceed even the most aggressive single-ETF approaches on a risk-adjusted basis. With approximately 15--17 trades per ETF per year, the strategy is operationally simple and suitable for automated execution.
+
+%% ============================================================
+\begin{thebibliography}{9}
+
+\bibitem{bogleheads_sma200}
+Bogleheads Forum,
+``Leveraged S\&P 500 based on SMA rules,''
+\url{https://www.bogleheads.org/forum/viewtopic.php?t=297591}, 2019--2025.
+
+\bibitem{hfea}
+Hedgefundie,
+``HEDGEFUNDIE's Excellent Adventure,''
+Bogleheads Forum, \url{https://www.bogleheads.org/forum/viewtopic.php?t=272007}, 2019.
+
+\bibitem{quantified_strategies}
+Quantified Strategies,
+``Triple Leveraged ETF Trading Strategy,''
+\url{https://www.quantifiedstrategies.com/triple-leveraged-etf-trading-strategy/}, 2024.
+
+\bibitem{hagan2002}
+P.~S.~Hagan, D.~Kumar, A.~S.~Lesniewski, D.~E.~Woodward,
+``Managing Smile Risk,''
+\textit{Wilmott Magazine}, pp.~84--108, September 2002.
+
+\bibitem{alvarez}
+Alvarez Quant Trading,
+``UPRO TQQQ Leveraged ETF Strategy,''
+\url{https://alvarezquanttrading.com/blog/upro-tqqq-leveraged-etf-strategy/}, 2023.
+
+\bibitem{quantpedia_vol}
+QuantPedia,
+``Leveraged ETFs in Low-Volatility Environments,''
+\url{https://quantpedia.com/leveraged-etfs-in-low-volatility-environments/}, 2025.
+
+\bibitem{moreira_muir}
+A.~Moreira, T.~Muir,
+``Volatility-Managed Portfolios,''
+\textit{Journal of Finance}, vol.~72, no.~4, pp.~1611--1644, 2017.
+
+\bibitem{aptus}
+Aptus Capital Advisors,
+``Utilizing Volatility Expectations to Guide Risk Taking,''
+\url{https://aptuscapitaladvisors.com/utilizing-volatility-expectations-to-guide-risk-taking/}, 2024.
+
+\bibitem{vix_managed}
+``VIX-managed portfolios,''
+\textit{International Review of Financial Analysis}, vol.~96, 2024.
+
+\end{thebibliography}
+
+\end{document}

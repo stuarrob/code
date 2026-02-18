@@ -2,6 +2,7 @@
 Step 4: Portfolio Construction & Optimization
 
 Builds target portfolio from factor scores using configurable optimizer.
+Shows human-readable ETF names and factor score breakdown for each holding.
 """
 
 import numpy as np
@@ -14,6 +15,7 @@ def build_portfolio(
     prices: pd.DataFrame,
     num_positions: int = 20,
     optimizer_type: str = "rankbased",
+    factor_detail: pd.DataFrame = None,
     categories: dict = None,
     output_file: Path = None,
 ) -> pd.Series:
@@ -24,6 +26,7 @@ def build_portfolio(
         prices: Price DataFrame (basic model, no leveraged).
         num_positions: Number of positions.
         optimizer_type: "rankbased" | "mvo" | "minvar" | "simple"
+        factor_detail: Optional DataFrame of individual factor scores per ticker.
         categories: Optional ticker->category mapping for display.
         output_file: Path to save target portfolio CSV.
 
@@ -80,4 +83,56 @@ def build_portfolio(
             port_vol = np.sqrt(w @ cov.values @ w)
             print(f"Expected vol: {port_vol:.1%}")
 
+    # Display holdings with names and factor breakdown
+    _print_holdings_detail(target_weights, factor_detail)
+
     return target_weights
+
+
+def _print_holdings_detail(
+    weights: pd.Series,
+    factor_detail: pd.DataFrame = None,
+) -> None:
+    """Print a human-readable portfolio table with ETF names and factor scores."""
+    try:
+        from utils.etf_names import lookup_names
+    except ImportError:
+        return
+
+    tickers = weights.index.tolist()
+    names = lookup_names(tickers, use_yfinance=True)
+
+    # Build percentile ranks for available factors
+    ranks = None
+    cols = []
+    if factor_detail is not None:
+        cols = list(factor_detail.columns)
+        ranks = pd.DataFrame()
+        for c in cols:
+            ranks[c] = factor_detail[c].rank(pct=True)
+
+    print(f"\n{'─' * 90}")
+    header = f"{'#':>2}  {'Ticker':<6}  {'Weight':>6}  {'Name':<42}"
+    if cols:
+        header += "  " + "  ".join(f"{c[:5].title():>5}" for c in cols)
+    print(header)
+    print(f"{'─' * 90}")
+
+    for i, t in enumerate(tickers, 1):
+        name = names.get(t, t)
+        if len(name) > 42:
+            name = name[:39] + "..."
+        line = f"{i:>2}  {t:<6}  {weights[t]:>5.1%}  {name:<42}"
+
+        if ranks is not None and t in ranks.index:
+            for c in cols:
+                val = ranks.loc[t, c]
+                if pd.notna(val):
+                    line += f"  {val:>4.0%} "
+                else:
+                    line += f"  {'—':>5}"
+        print(line)
+
+    print(f"{'─' * 90}")
+    if cols:
+        print("Factor columns show percentile rank vs full universe (higher = better)")

@@ -80,6 +80,24 @@ logs/*.log
 .DS_Store
 Thumbs.db
 
+# LaTeX intermediate files
+*.aux
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.nav
+*.snm
+*.vrb
+*.bbl
+*.blg
+*.bcf
+*.run.xml
+
 # Temporary files
 *.tmp
 *.bak

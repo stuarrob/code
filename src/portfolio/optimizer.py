@@ -380,14 +380,35 @@ class MinVarianceOptimizer:
 
 class MeanVarianceOptimizer:
     """
-    Mean-Variance Optimizer (Markowitz) with Axioma adjustment.
+    Robust Mean-Variance Optimizer with shrinkage + Michaud resampling.
 
-    Maximizes: Expected Return - λ * Risk
-    With Axioma adjustment for robustness under uncertain returns.
+    Classical MVO is an "error maximizer" — small noise in expected
+    returns produces large, unstable weight swings (Michaud 1989,
+    Axioma Research).  This implementation applies three layers of
+    defence:
 
-    This is the classic Markowitz portfolio optimization, enhanced with
-    the Axioma risk penalty to make it more robust to estimation error
-    in expected returns.
+    1. **Ledoit-Wolf covariance shrinkage** — stabilises the sample
+       covariance matrix, especially when N assets >> T observations.
+    2. **Bayes-Stein return shrinkage** — pulls expected returns
+       toward the grand mean, reducing the influence of noisy outlier
+       scores.  Controlled by `shrinkage_strength` in [0, 1]:
+       0 = no shrinkage (raw scores), 1 = equal returns (no signal).
+    3. **Michaud-style resampling** — runs the optimisation
+       `n_resample` times on bootstrapped (noise-perturbed) returns,
+       then averages weights.  This smooths out sensitivity to any
+       single return vector.
+
+    The Axioma risk penalty (gamma * w'sigma) is retained on top,
+    penalising high-volatility positions.
+
+    References
+    ----------
+    - Michaud, "Efficient Asset Management", 1998
+    - Ledoit & Wolf, "Honey, I Shrunk the Sample Covariance Matrix",
+      Journal of Portfolio Management 30(4), 2004
+    - Jorion, "Bayes-Stein Estimation for Portfolio Analysis",
+      JFQA 21(3), 1986
+    - Axioma Research, "Robust Portfolio Optimization"
     """
 
     def __init__(self,
@@ -398,31 +419,38 @@ class MeanVarianceOptimizer:
                  axioma_penalty: float = 0.01,
                  use_factor_scores_as_alpha: bool = True,
                  min_weight: float = 0.03,
-                 max_weight: float = 0.08):
+                 max_weight: float = 0.08,
+                 shrinkage_strength: float = 0.5,
+                 n_resample: int = 50,
+                 resample_noise: float = 0.5):
         """
         Parameters
         ----------
         num_positions : int
-            Number of positions to select
+            Number of positions to select.
         min_score : float, optional
-            Minimum factor score threshold
+            Minimum factor score threshold.
         lookback : int
-            Days of returns history for covariance estimation
+            Days of returns history for covariance estimation.
         risk_aversion : float
-            Risk aversion parameter λ (default: 1.0)
-            Higher = more risk averse
+            Risk aversion parameter lambda (default: 1.0).
         axioma_penalty : float
-            Axioma risk penalty (default: 0.01)
-            Makes optimizer robust to return estimation error
+            Axioma risk penalty (default: 0.01).
         use_factor_scores_as_alpha : bool
-            Use factor scores as expected return signal (default: True)
-            If False, uses historical mean returns
+            Use factor scores as expected return signal (default: True).
         min_weight : float
-            Minimum weight per position (default: 0.03 = 3%)
-            Forces allocation to all selected positions
+            Minimum weight per position (default: 3%).
         max_weight : float
-            Maximum weight per position (default: 0.08 = 8%)
-            Prevents over-concentration
+            Maximum weight per position (default: 8%).
+        shrinkage_strength : float
+            Bayes-Stein shrinkage toward equal returns (default: 0.5).
+            0 = pure factor signal, 1 = equal returns (no signal).
+        n_resample : int
+            Number of Michaud bootstrap iterations (default: 50).
+            0 = single-shot MVO (no resampling).
+        resample_noise : float
+            Scale of Gaussian noise added to returns per resample,
+            as fraction of cross-sectional std (default: 0.5).
         """
         self.num_positions = num_positions
         self.min_score = min_score
@@ -432,112 +460,183 @@ class MeanVarianceOptimizer:
         self.use_factor_scores_as_alpha = use_factor_scores_as_alpha
         self.min_weight = min_weight
         self.max_weight = max_weight
+        self.shrinkage_strength = shrinkage_strength
+        self.n_resample = n_resample
+        self.resample_noise = resample_noise
+
+    def _estimate_covariance(self, returns: pd.DataFrame) -> np.ndarray:
+        """Estimate covariance with Ledoit-Wolf shrinkage."""
+        try:
+            from sklearn.covariance import LedoitWolf
+            lw = LedoitWolf().fit(returns.values)
+            logger.info(
+                f"  Ledoit-Wolf shrinkage coefficient: "
+                f"{lw.shrinkage_:.3f}"
+            )
+            return lw.covariance_
+        except ImportError:
+            logger.warning(
+                "sklearn unavailable — using sample covariance"
+            )
+            return returns.cov().values
+
+    def _shrink_returns(self, raw_alpha: np.ndarray) -> np.ndarray:
+        """Bayes-Stein shrinkage toward the cross-sectional mean."""
+        grand_mean = raw_alpha.mean()
+        return (
+            (1 - self.shrinkage_strength) * raw_alpha
+            + self.shrinkage_strength * grand_mean
+        )
+
+    def _solve_single(self,
+                      expected_returns: np.ndarray,
+                      cov_matrix: np.ndarray,
+                      volatility: np.ndarray,
+                      n: int) -> Optional[np.ndarray]:
+        """Solve one MVO instance. Returns weight array or None."""
+        import cvxpy as cp
+
+        w = cp.Variable(n)
+        port_ret = w @ expected_returns
+        port_var = cp.quad_form(w, cov_matrix)
+        penalty = self.axioma_penalty * (w @ volatility)
+
+        objective = cp.Maximize(
+            port_ret
+            - self.risk_aversion * port_var
+            - penalty
+        )
+        constraints = [
+            cp.sum(w) == 1,
+            w >= self.min_weight,
+            w <= self.max_weight,
+        ]
+
+        prob = cp.Problem(objective, constraints)
+        prob.solve(solver=cp.OSQP, verbose=False)
+
+        if prob.status in ('optimal', 'optimal_inaccurate'):
+            wv = np.array(w.value).flatten()
+            wv[wv < 1e-6] = 0
+            s = wv.sum()
+            if s > 0:
+                wv /= s
+            return wv
+        return None
 
     def optimize(self,
                  factor_scores: pd.Series,
                  prices: pd.DataFrame) -> pd.Series:
         """
-        Optimize using mean-variance framework with Axioma adjustment.
+        Robust MVO with shrinkage + Michaud resampling.
 
         Parameters
         ----------
         factor_scores : pd.Series
-            Factor scores for each ETF (used as expected return signal)
+            Factor scores (used as expected-return signal).
         prices : pd.DataFrame
-            Historical prices for covariance estimation
+            Historical prices for covariance estimation.
 
         Returns
         -------
         pd.Series
-            Portfolio weights
+            Portfolio weights.
         """
         try:
-            import cvxpy as cp
+            import cvxpy as cp  # noqa: F401
         except ImportError:
-            raise ImportError("cvxpy required for MeanVarianceOptimizer. Install with: pip install cvxpy")
+            raise ImportError(
+                "cvxpy required for MeanVarianceOptimizer. "
+                "Install: pip install cvxpy"
+            )
 
-        # Filter by score
+        # Select top candidates by factor score
+        eligible = factor_scores
         if self.min_score is not None:
-            eligible = factor_scores[factor_scores >= self.min_score]
-        else:
-            eligible = factor_scores
+            eligible = eligible[eligible >= self.min_score]
 
-        # Select top candidates
-        num_to_select = min(self.num_positions, len(eligible))
-        selected_tickers = eligible.nlargest(num_to_select).index.tolist()
+        k = min(self.num_positions, len(eligible))
+        selected = eligible.nlargest(k).index.tolist()
 
-        # Calculate returns and covariance
-        returns = prices[selected_tickers].pct_change().dropna().tail(self.lookback)
-
-        if len(returns) < self.lookback:
-            logger.warning(f"Insufficient data for covariance: {len(returns)}/{self.lookback} days")
-
-        cov_matrix = returns.cov().values
-
-        # Expected returns
-        if self.use_factor_scores_as_alpha:
-            # Use factor scores as signal of expected returns
-            # Normalize to reasonable return range (annualized)
-            alpha = factor_scores[selected_tickers].values
-            alpha_normalized = (alpha - alpha.mean()) / alpha.std()
-            expected_returns = alpha_normalized * 0.02  # Scale to ±2% alpha (reduced from 0.10 to prevent over-concentration)
-        else:
-            # Use historical mean returns
-            expected_returns = returns.mean().values * 252  # Annualized
-
-        # Individual volatilities for Axioma adjustment
-        volatility = returns.std().values * np.sqrt(252)  # Annualized
-
-        # Optimization
-        n = len(selected_tickers)
-        w = cp.Variable(n)
-
-        # Objective: max(Expected Return - λ * Risk + Axioma adjustment)
-        # Standard MVO:  max μ'w - λ * w'Σw
-        # With Axioma:   max μ'w - λ * w'Σw - γ * w'σ
-        # where μ = expected returns, Σ = covariance, σ = volatility, γ = Axioma penalty
-
-        portfolio_return = w @ expected_returns
-        portfolio_variance = cp.quad_form(w, cov_matrix)
-        axioma_penalty = self.axioma_penalty * (w @ volatility)
-
-        # Maximize return, minimize risk
-        # Note: CVXPY minimizes, so we negate the objective
-        objective = cp.Maximize(
-            portfolio_return - self.risk_aversion * portfolio_variance - axioma_penalty
+        # Returns
+        rets = (
+            prices[selected].pct_change().dropna()
+            .tail(self.lookback)
         )
+        if len(rets) < self.lookback:
+            logger.warning(
+                f"Insufficient data: {len(rets)}/{self.lookback}"
+            )
 
-        # Constraints
-        constraints = [
-            cp.sum(w) == 1,           # Weights sum to 1
-            w >= self.min_weight,     # Min weight per position (forces diversification)
-            w <= self.max_weight,     # Max weight per position (prevents concentration)
-        ]
+        # 1. Ledoit-Wolf covariance shrinkage
+        cov_matrix = self._estimate_covariance(rets)
 
-        # Solve
-        problem = cp.Problem(objective, constraints)
-        problem.solve(solver=cp.OSQP, verbose=False)
-
-        if problem.status not in ['optimal', 'optimal_inaccurate']:
-            logger.error(f"Optimization failed: {problem.status}")
-            # Fall back to equal weight
-            weights = pd.Series(1.0 / n, index=selected_tickers)
+        # 2. Bayes-Stein return shrinkage
+        if self.use_factor_scores_as_alpha:
+            alpha = factor_scores[selected].values
+            alpha_std = alpha.std()
+            if alpha_std > 0:
+                alpha_norm = (alpha - alpha.mean()) / alpha_std
+            else:
+                alpha_norm = np.zeros_like(alpha)
+            raw_alpha = alpha_norm * 0.02  # ±2% annualised
         else:
-            weights = pd.Series(w.value, index=selected_tickers)
-            # Clean up tiny weights
-            weights[weights < 1e-6] = 0
-            weights = weights / weights.sum()
+            raw_alpha = rets.mean().values * 252
 
-        # Calculate portfolio volatility (annualized)
-        # Note: cov_matrix is in daily units, so multiply by sqrt(252) to annualize
-        realized_vol_annual = np.sqrt(weights @ cov_matrix @ weights) * np.sqrt(252)
+        exp_ret = self._shrink_returns(raw_alpha)
+        vol = rets.std().values * np.sqrt(252)
 
-        logger.info(f"Mean-variance portfolio: {len(weights[weights > 0.01])} non-zero positions")
-        logger.info(f"  Historical portfolio volatility: {realized_vol_annual:.2%}")
-        logger.info(f"  Expected performance (from backtests):")
-        logger.info(f"    - CAGR: ~17% (validated 2020-2025)")
-        logger.info(f"    - Sharpe: ~1.07")
-        logger.info(f"    - Max DD: ~15-20%")
-        logger.info(f"  Axioma penalty: {self.axioma_penalty}, Risk aversion: {self.risk_aversion}")
+        n = len(selected)
+
+        # 3. Michaud resampling
+        if self.n_resample > 0:
+            rng = np.random.default_rng(42)
+            noise_scale = self.resample_noise * exp_ret.std()
+            samples = []
+            for _ in range(self.n_resample):
+                perturbed = exp_ret + rng.normal(
+                    0, noise_scale, size=n
+                )
+                w_i = self._solve_single(
+                    perturbed, cov_matrix, vol, n
+                )
+                if w_i is not None:
+                    samples.append(w_i)
+
+            if samples:
+                avg = np.mean(samples, axis=0)
+                avg[avg < 1e-6] = 0
+                avg /= avg.sum()
+                weights = pd.Series(avg, index=selected)
+                logger.info(
+                    f"  Michaud resampling: "
+                    f"{len(samples)}/{self.n_resample} solves OK"
+                )
+            else:
+                logger.error("All resampled solves failed")
+                weights = pd.Series(1.0 / n, index=selected)
+        else:
+            w_opt = self._solve_single(
+                exp_ret, cov_matrix, vol, n
+            )
+            if w_opt is not None:
+                weights = pd.Series(w_opt, index=selected)
+            else:
+                logger.error("Optimisation failed — equal weight")
+                weights = pd.Series(1.0 / n, index=selected)
+
+        # Log diagnostics
+        wv = weights.values
+        pvol = np.sqrt(wv @ cov_matrix @ wv) * np.sqrt(252)
+        active = int((weights > 0.01).sum())
+        logger.info(
+            f"Robust MVO: {active} positions, "
+            f"vol={pvol:.2%}"
+        )
+        logger.info(
+            f"  shrinkage={self.shrinkage_strength:.0%}, "
+            f"resamples={self.n_resample}, "
+            f"axioma={self.axioma_penalty}"
+        )
 
         return weights
