@@ -441,6 +441,9 @@ def generate_trades(
     if deploy_cash is not None:
         sizing_basis = invested_value + deploy_cash
         deployable = deploy_cash
+        # In deploy mode, bypass drift threshold so all underweight
+        # positions get topped up — the user explicitly wants to spend
+        drift_rebalance_pct = 0.0
         print(
             f"\nAccount: NLV=${nlv:,.0f}  Cash=${cash:,.0f}  "
             f"Invested=${invested_value:,.0f}"
@@ -514,8 +517,9 @@ def generate_trades(
         if t["action"] == "BUY_TO_COVER"
     )
     if deploy_cash is not None:
+        # Cap at actual cash so we never buy on margin
         available = max(
-            0, deploy_cash + sell_proceeds - cover_cost
+            0, min(deploy_cash, cash) + sell_proceeds - cover_cost
         )
     else:
         available = max(
