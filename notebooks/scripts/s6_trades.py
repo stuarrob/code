@@ -2,12 +2,21 @@
 Step 6: Trade Recommendations
 
 Connects to IB, pulls live positions, compares vs target portfolio,
-generates trade plan with $70k cash reserve enforcement.
+generates trade plan.
 
-Includes ETF names and explains WHY positions change.
+Three-phase workflow (when called from notebook):
+  1. cleanup_account() — cancel orphan orders, cover shorts
+  2. generate_trades() — compare target vs live, produce trade plan
+  3. write_portfolio_state() — snapshot for execution notebook
+
+Two sizing modes:
+  - deploy_cash=None: sizes to full NLV, caps buys by cash_reserve
+  - deploy_cash=X:    sizes to (invested + X), caps buys by X
 """
 
 import csv
+import hashlib
+import json
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +25,304 @@ import pandas as pd
 
 
 CASH_RESERVE = 70_000
+
+
+def cleanup_account(
+    ib_host: str = "127.0.0.1",
+    ib_port: int = 4001,
+    ib_client_id: int = 6,
+) -> dict:
+    """Cancel all open orders and cover any short positions.
+
+    Puts the account in a clean state before generating a trade plan.
+
+    Returns:
+        dict with cleanup results including positions/cash after cleanup.
+    """
+    from ib_insync import IB, Stock, MarketOrder
+
+    ib = IB()
+    try:
+        ib.connect(
+            ib_host, ib_port,
+            clientId=ib_client_id,
+            readonly=False, timeout=10,
+        )
+        account = ib.managedAccounts()[0]
+        print(f"Connected for cleanup: {account}")
+
+        # Phase 1: Cancel ALL open orders
+        open_trades = ib.openTrades()
+        orders_cancelled = 0
+        if open_trades:
+            print(f"\n  Cancelling {len(open_trades)} open orders...")
+            for t in open_trades:
+                sym = t.contract.symbol
+                action = t.order.action
+                qty = int(t.order.totalQuantity)
+                otype = t.order.orderType
+                print(
+                    f"    CANCEL: {action} {qty} {sym}"
+                    f" ({otype} {t.order.tif})"
+                )
+                ib.cancelOrder(t.order)
+                orders_cancelled += 1
+            ib.sleep(3)
+            print(f"  Cancelled {orders_cancelled} orders")
+        else:
+            print("  No open orders to cancel")
+
+        # Phase 2: Cover ALL short positions
+        shorts_covered = []
+        positions = ib.positions()
+        for p in positions:
+            shares = float(p.position)
+            if shares < 0:
+                sym = p.contract.symbol
+                cover_qty = int(abs(shares))
+                print(
+                    f"\n  Covering short: BUY {cover_qty}"
+                    f" {sym} (currently {shares:.0f})"
+                )
+                contract = Stock(sym, "SMART", "USD")
+                try:
+                    ib.qualifyContracts(contract)
+                    order = MarketOrder("BUY", cover_qty)
+                    trade = ib.placeOrder(contract, order)
+                    ib.sleep(3)
+                    status = trade.orderStatus.status
+                    fill = trade.orderStatus.avgFillPrice
+                    print(
+                        f"    {status}"
+                        + (f" @ ${fill:.2f}" if fill else "")
+                    )
+                    shorts_covered.append({
+                        "ticker": sym,
+                        "shares": cover_qty,
+                        "action": "BUY_TO_COVER",
+                        "status": status,
+                        "fill_price": fill,
+                    })
+                except Exception as e:
+                    print(f"    FAILED: {e}")
+                    shorts_covered.append({
+                        "ticker": sym,
+                        "shares": cover_qty,
+                        "action": "BUY_TO_COVER",
+                        "status": "FAILED",
+                        "fill_price": 0,
+                    })
+
+        # Phase 3: Re-read clean state
+        ib.sleep(2)
+        summary = {}
+        for av in ib.accountSummary():
+            if av.currency == "USD":
+                try:
+                    summary[av.tag] = float(av.value)
+                except (ValueError, TypeError):
+                    pass
+
+        positions_after = {}
+        for p in ib.positions():
+            shares = float(p.position)
+            if shares != 0:
+                positions_after[p.contract.symbol] = {
+                    "shares": shares,
+                    "avg_cost": round(float(p.avgCost), 2),
+                }
+
+        remaining_orders = len(ib.openTrades())
+        short_count = sum(
+            1 for v in positions_after.values()
+            if v["shares"] < 0
+        )
+
+        cleanup_at = datetime.now().isoformat()
+
+        print(f"\n{'─' * 50}")
+        print("CLEANUP COMPLETE")
+        print(f"  Orders cancelled: {orders_cancelled}")
+        print(f"  Shorts covered:   {len(shorts_covered)}")
+        print(f"  Remaining orders: {remaining_orders}")
+        print(f"  Remaining shorts: {short_count}")
+        print(
+            f"  Cash after:       "
+            f"${summary.get('TotalCashValue', 0):,.0f}"
+        )
+        print(
+            f"  NLV after:        "
+            f"${summary.get('NetLiquidation', 0):,.0f}"
+        )
+        print(f"{'─' * 50}")
+
+        if remaining_orders > 0:
+            print("  WARNING: Some orders could not be cancelled")
+        if short_count > 0:
+            print("  WARNING: Some shorts could not be covered")
+
+        return {
+            "orders_cancelled": orders_cancelled,
+            "shorts_covered": shorts_covered,
+            "positions_after": positions_after,
+            "cash_after": summary.get("TotalCashValue", 0),
+            "nlv_after": summary.get("NetLiquidation", 0),
+            "open_orders_after": remaining_orders,
+            "short_count_after": short_count,
+            "cleanup_at": cleanup_at,
+            "account": account,
+        }
+
+    finally:
+        ib.disconnect()
+
+
+def write_portfolio_state(
+    cleanup_result: dict,
+    trades: list,
+    target_weights: "pd.Series",
+    live_dir: Path,
+    deploy_cash: float = None,
+    sizing_basis: float = None,
+    ib_positions: list = None,
+    live_prices: dict = None,
+    cash: float = None,
+    nlv: float = None,
+    account: str = None,
+) -> Path:
+    """Write portfolio_state.json as the contract between notebooks.
+
+    Returns:
+        Path to the written state file.
+    """
+    # Build pre-trade positions from cleanup result
+    pre_positions = {}
+    for ticker, info in cleanup_result["positions_after"].items():
+        price = (
+            live_prices.get(ticker, info["avg_cost"])
+            if live_prices else info["avg_cost"]
+        )
+        pre_positions[ticker] = {
+            "shares": info["shares"],
+            "price": round(price, 2),
+        }
+
+    # Compute expected post-trade positions
+    expected_positions = {}
+    # Start with current positions
+    for ticker, info in pre_positions.items():
+        expected_positions[ticker] = {
+            "shares": info["shares"],
+            "price": info["price"],
+        }
+    # Apply trades
+    for t in trades:
+        ticker = t["ticker"]
+        shares = t["shares"]
+        price = t.get("price", 0)
+        if t["action"] == "SELL":
+            if ticker in expected_positions:
+                remaining = (
+                    expected_positions[ticker]["shares"] - shares
+                )
+                if remaining <= 0:
+                    expected_positions.pop(ticker, None)
+                else:
+                    expected_positions[ticker]["shares"] = remaining
+        elif t["action"] in ("BUY", "BUY_TO_COVER"):
+            if ticker in expected_positions:
+                expected_positions[ticker]["shares"] += shares
+            else:
+                expected_positions[ticker] = {
+                    "shares": shares,
+                    "price": price,
+                }
+
+    # Remove zero-share positions
+    expected_positions = {
+        k: v for k, v in expected_positions.items()
+        if v["shares"] != 0
+    }
+
+    # Compute expected cash
+    total_buys = sum(
+        t["est_value"] for t in trades
+        if t["action"] in ("BUY", "BUY_TO_COVER")
+    )
+    total_sells = sum(
+        t["est_value"] for t in trades
+        if t["action"] == "SELL"
+    )
+    estimated_cash = (cash or 0) + total_sells - total_buys
+
+    # Compute checksums
+    checksums = {}
+    trade_plan_file = live_dir / "trade_plan.csv"
+    target_file = live_dir / "target_portfolio_latest.csv"
+    for label, fpath in [
+        ("trade_plan_csv", trade_plan_file),
+        ("target_portfolio_csv", target_file),
+    ]:
+        if fpath.exists():
+            h = hashlib.sha256(fpath.read_bytes()).hexdigest()
+            checksums[label] = f"sha256:{h}"
+
+    # Build trade summary for state file
+    trade_summary = []
+    for t in trades:
+        trade_summary.append({
+            "action": t["action"],
+            "ticker": t["ticker"],
+            "shares": t["shares"],
+            "price": t.get("price", 0),
+            "est_value": t.get("est_value", 0),
+        })
+
+    state = {
+        "version": 1,
+        "generated_at": datetime.now().isoformat(),
+        "account": account or cleanup_result.get("account", ""),
+        "cleanup_performed": {
+            "orders_cancelled": cleanup_result["orders_cancelled"],
+            "shorts_covered": cleanup_result["shorts_covered"],
+            "cleanup_at": cleanup_result["cleanup_at"],
+        },
+        "pre_trade_state": {
+            "positions": pre_positions,
+            "cash": round(cash or 0, 2),
+            "nlv": round(nlv or 0, 2),
+            "open_orders": cleanup_result["open_orders_after"],
+        },
+        "trade_plan": {
+            "file": "trade_plan.csv",
+            "deploy_cash": deploy_cash,
+            "sizing_basis": round(sizing_basis or 0, 2),
+            "trades": trade_summary,
+            "total_buys": round(total_buys, 2),
+            "total_sells": round(total_sells, 2),
+        },
+        "expected_post_trade": {
+            "positions": expected_positions,
+            "estimated_cash": round(estimated_cash, 2),
+        },
+        "target_weights": (
+            target_weights.round(6).to_dict()
+            if target_weights is not None else {}
+        ),
+        "checksums": checksums,
+    }
+
+    state_file = live_dir / "portfolio_state.json"
+    with open(state_file, "w") as f:
+        json.dump(state, f, indent=2, default=str)
+
+    print(f"Portfolio state written: {state_file}")
+    print(f"  Pre-trade positions:  {len(pre_positions)}")
+    print(f"  Planned trades:       {len(trades)}")
+    print(f"  Expected positions:   {len(expected_positions)}")
+    print(f"  Expected cash:        ${estimated_cash:,.0f}")
+
+    return state_file
 
 
 def generate_trades(
@@ -27,7 +334,9 @@ def generate_trades(
     ib_client_id: int = 5,
     cash_reserve: float = CASH_RESERVE,
     drift_rebalance_pct: float = 0.03,
-) -> list:
+    deploy_cash: float = None,
+    return_context: bool = False,
+):
     """Generate trade recommendations.
 
     Compares target vs live positions.
@@ -40,11 +349,16 @@ def generate_trades(
         ib_host: IB Gateway host.
         ib_port: IB Gateway port.
         ib_client_id: IB client ID.
-        cash_reserve: Minimum cash to keep.
+        cash_reserve: Minimum cash to keep (used when deploy_cash is None).
         drift_rebalance_pct: Drift threshold for rebalancing.
+        deploy_cash: Explicit cash amount to deploy. When set, position
+            sizing uses (current invested + deploy_cash) as the portfolio
+            basis and buy spending is capped at deploy_cash. Overrides
+            cash_reserve.
+        return_context: If True, return (trades, context_dict) tuple.
 
     Returns:
-        list of trade dicts.
+        list of trade dicts, or (list, dict) if return_context=True.
     """
     from ib_insync import IB, Stock
 
@@ -55,10 +369,13 @@ def generate_trades(
             clientId=ib_client_id,
             readonly=True, timeout=10,
         )
-        print(f"Connected: {ib.managedAccounts()[0]}")
+        account_name = ib.managedAccounts()[0]
+        print(f"Connected: {account_name}")
     except Exception as e:
         print(f"IB not available: {e}")
         print("Cannot generate trade recommendations without IB.")
+        if return_context:
+            return [], {}
         return []
 
     # Account summary
@@ -113,11 +430,35 @@ def generate_trades(
         ib.cancelMktData(td.contract)
     ib.reqMarketDataType(1)
 
-    deployable = max(0, cash - cash_reserve)
-    print(
-        f"\nAccount: NLV=${nlv:,.0f}  Cash=${cash:,.0f}  "
-        f"Reserve=${cash_reserve:,}  Deployable=${deployable:,.0f}"
+    # Compute current invested value (for deploy_cash mode)
+    invested_value = sum(
+        p["shares"] * live_prices.get(p["ticker"], p["avg_cost"])
+        for p in ib_positions
+        if p["shares"] > 0
     )
+
+    # Determine sizing basis and deployable cash
+    if deploy_cash is not None:
+        sizing_basis = invested_value + deploy_cash
+        deployable = deploy_cash
+        print(
+            f"\nAccount: NLV=${nlv:,.0f}  Cash=${cash:,.0f}  "
+            f"Invested=${invested_value:,.0f}"
+        )
+        print(
+            f"Deploy mode: deploying ${deploy_cash:,.0f} additional cash"
+        )
+        print(
+            f"Sizing basis: ${sizing_basis:,.0f} "
+            f"(invested + deploy_cash)"
+        )
+    else:
+        sizing_basis = nlv
+        deployable = max(0, cash - cash_reserve)
+        print(
+            f"\nAccount: NLV=${nlv:,.0f}  Cash=${cash:,.0f}  "
+            f"Reserve=${cash_reserve:,}  Deployable=${deployable:,.0f}"
+        )
     print(
         f"Positions: {len(ib_positions)}  |  "
         f"Live prices: {len(live_prices)}"
@@ -136,7 +477,7 @@ def generate_trades(
         price = live_prices.get(t, pos["avg_cost"])
         mv = pos["shares"] * price
         tw = targets.get(t, 0)
-        aw = mv / nlv if nlv else 0
+        aw = mv / sizing_basis if sizing_basis else 0
         ib_map[t] = pos
         pos_data.append({
             "ticker": t, "shares": pos["shares"],
@@ -172,9 +513,14 @@ def generate_trades(
         t["est_value"] for t in trades
         if t["action"] == "BUY_TO_COVER"
     )
-    available = max(
-        0, cash + sell_proceeds - cover_cost - cash_reserve
-    )
+    if deploy_cash is not None:
+        available = max(
+            0, deploy_cash + sell_proceeds - cover_cost
+        )
+    else:
+        available = max(
+            0, cash + sell_proceeds - cover_cost - cash_reserve
+        )
 
     # Buys: new positions + rebalance drifted
     buy_candidates = []
@@ -182,7 +528,7 @@ def generate_trades(
         if ticker not in ib_map:
             price = live_prices.get(ticker)
             if price and price > 0:
-                sh = int(tw * nlv / price)
+                sh = int(tw * sizing_basis / price)
                 if sh > 0:
                     pct = tw * 100
                     buy_candidates.append({
@@ -198,7 +544,7 @@ def generate_trades(
     for p in pos_data:
         drift_pct = p["drift"] * 100
         if p["target_w"] > 0 and abs(p["drift"]) > drift_rebalance_pct:
-            diff = p["target_w"] * nlv - p["mkt_value"]
+            diff = p["target_w"] * sizing_basis - p["mkt_value"]
             ds = int(abs(diff) / p["price"])
             if ds > 0:
                 if diff > 0:
@@ -237,9 +583,14 @@ def generate_trades(
                     bc["est_value"] = round(
                         reduced * bc["price"], 2
                     )
-                    bc["reason"] += (
-                        f" [capped by ${cash_reserve:,} reserve]"
-                    )
+                    if deploy_cash is not None:
+                        bc["reason"] += (
+                            f" [capped by ${deploy_cash:,.0f} budget]"
+                        )
+                    else:
+                        bc["reason"] += (
+                            f" [capped by ${cash_reserve:,} reserve]"
+                        )
                     trades.append(bc)
                     running_spend += bc["est_value"]
 
@@ -295,7 +646,16 @@ def generate_trades(
     cash_after = cash + total_sells - total_buys
     print(f"\nTrade plan: {len(trades)} trades")
     print(f"  Buys: ${total_buys:,.0f}  |  Sells: ${total_sells:,.0f}")
-    print(f"  Cash after: ${cash_after:,.0f} (reserve: ${cash_reserve:,})")
+    if deploy_cash is not None:
+        print(
+            f"  Cash after: ${cash_after:,.0f} "
+            f"(deployed: ${deploy_cash:,.0f})"
+        )
+    else:
+        print(
+            f"  Cash after: ${cash_after:,.0f} "
+            f"(reserve: ${cash_reserve:,})"
+        )
     print(f"Saved: {trade_plan_file}")
 
     # Print human-readable trade summary
@@ -305,6 +665,17 @@ def generate_trades(
     )
 
     ib.disconnect()
+
+    if return_context:
+        context = {
+            "ib_positions": ib_positions,
+            "live_prices": live_prices,
+            "cash": cash,
+            "nlv": nlv,
+            "sizing_basis": sizing_basis,
+            "account": account_name,
+        }
+        return trades, context
     return trades
 
 

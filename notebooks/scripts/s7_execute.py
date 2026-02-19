@@ -19,6 +19,500 @@ import pandas as pd
 TRAILING_STOP_PCT = 10  # 10% trailing stop on all buys
 
 
+def get_account_state(
+    ib_host: str = "127.0.0.1",
+    ib_port: int = 4001,
+    ib_client_id: int = 16,
+) -> dict:
+    """Connect to IB and return full account state.
+
+    Returns dict with:
+        positions: list of {ticker, shares, avg_cost, mkt_value}
+        long_positions: list (shares > 0)
+        short_positions: list (shares < 0)
+        open_orders: list of {ticker, action, shares, order_type, status, order_id}
+        nlv: float
+        cash: float
+        margin_used: float
+    """
+    from ib_insync import IB
+
+    ib = IB()
+    ib.connect(ib_host, ib_port, clientId=ib_client_id, readonly=True, timeout=10)
+    account = ib.managedAccounts()[0]
+    print(f"Connected (read-only): {account}")
+
+    # Account summary
+    summary = {}
+    for av in ib.accountSummary():
+        if av.currency == "USD":
+            try:
+                summary[av.tag] = float(av.value)
+            except (ValueError, TypeError):
+                pass
+
+    nlv = summary.get("NetLiquidation", 0)
+    cash = summary.get("TotalCashValue", 0)
+    margin_used = summary.get("MaintMarginReq", 0)
+    buying_power = summary.get("BuyingPower", 0)
+
+    # Positions
+    positions = []
+    for p in ib.positions():
+        shares = float(p.position)
+        if shares == 0:
+            continue
+        avg_cost = float(p.avgCost)
+        mkt_value = shares * avg_cost  # approximate
+        positions.append({
+            "ticker": p.contract.symbol,
+            "shares": shares,
+            "avg_cost": round(avg_cost, 2),
+            "mkt_value": round(mkt_value, 2),
+        })
+
+    positions.sort(key=lambda x: x["ticker"])
+    long_pos = [p for p in positions if p["shares"] > 0]
+    short_pos = [p for p in positions if p["shares"] < 0]
+
+    # Open orders
+    open_orders = []
+    for t in ib.openTrades():
+        open_orders.append({
+            "ticker": t.contract.symbol,
+            "action": t.order.action,
+            "shares": int(t.order.totalQuantity),
+            "order_type": t.order.orderType,
+            "tif": t.order.tif,
+            "status": t.orderStatus.status,
+            "order_id": t.order.orderId,
+            "limit_price": getattr(t.order, "lmtPrice", None),
+        })
+
+    ib.disconnect()
+
+    # Print summary
+    print(f"\n{'═' * 60}")
+    print("ACCOUNT STATE")
+    print(f"{'═' * 60}")
+    print(f"  NLV:          ${nlv:>12,.0f}")
+    print(f"  Cash:         ${cash:>12,.0f}")
+    print(f"  Margin used:  ${margin_used:>12,.0f}")
+    print(f"  Buying power: ${buying_power:>12,.0f}")
+    print(f"  Open orders:  {len(open_orders)}")
+
+    if long_pos:
+        total_long = sum(p["mkt_value"] for p in long_pos)
+        print(f"\n  LONG positions ({len(long_pos)}):"
+              f"  total ~${total_long:,.0f}")
+        for p in long_pos:
+            print(f"    {p['ticker']:<6} {p['shares']:>8.0f} shares"
+                  f"  avg ${p['avg_cost']:>8.2f}"
+                  f"  ~${p['mkt_value']:>10,.0f}")
+
+    if short_pos:
+        total_short = sum(abs(p["mkt_value"]) for p in short_pos)
+        print(f"\n  SHORT positions ({len(short_pos)}):"
+              f"  total ~${total_short:,.0f}")
+        print("  *** WARNING: SHORT POSITIONS DETECTED ***")
+        for p in short_pos:
+            print(f"    {p['ticker']:<6} {p['shares']:>8.0f} shares"
+                  f"  avg ${p['avg_cost']:>8.2f}"
+                  f"  ~${abs(p['mkt_value']):>10,.0f}")
+
+    if cash < 0:
+        print(f"\n  *** WARNING: NEGATIVE CASH (${cash:,.0f}) ***")
+        print("  *** ACCOUNT IS USING MARGIN/LEVERAGE ***")
+
+    if open_orders:
+        print(f"\n  Open orders ({len(open_orders)}):")
+        for o in open_orders:
+            lp = f" limit ${o['limit_price']:.2f}" if o.get("limit_price") else ""
+            print(f"    {o['action']:>4} {o['shares']:>5} {o['ticker']:<6}"
+                  f" ({o['order_type']} {o['tif']}){lp}"
+                  f" — {o['status']}")
+    print(f"{'═' * 60}")
+
+    return {
+        "positions": positions,
+        "long_positions": long_pos,
+        "short_positions": short_pos,
+        "open_orders": open_orders,
+        "nlv": nlv,
+        "cash": cash,
+        "margin_used": margin_used,
+        "buying_power": buying_power,
+        "account": account,
+        "summary": summary,
+    }
+
+
+def verify_portfolio_state(
+    state_file: Path,
+    ib_host: str = "127.0.0.1",
+    ib_port: int = 4001,
+    ib_client_id: int = 16,
+    cash_tolerance_pct: float = 2.0,
+) -> dict:
+    """Verify current IB account matches portfolio_state.json snapshot.
+
+    Connects read-only to IB. Compares positions, cash, open orders.
+
+    Returns:
+        dict with valid (bool), state, discrepancies, current_state.
+    """
+    import hashlib
+    from ib_insync import IB
+
+    discrepancies = []
+
+    # Load state file
+    state_path = Path(state_file)
+    if not state_path.exists():
+        print("STATE FILE NOT FOUND")
+        return {
+            "valid": False,
+            "state": None,
+            "discrepancies": [{
+                "field": "state_file",
+                "expected": str(state_path),
+                "actual": "missing",
+                "severity": "CRITICAL",
+            }],
+            "current_state": None,
+        }
+
+    with open(state_path) as f:
+        state = json.load(f)
+
+    print(f"State file: {state_path}")
+    print(f"Generated: {state['generated_at']}")
+    print(f"Account:   {state['account']}")
+
+    # Connect to IB
+    ib = IB()
+    try:
+        ib.connect(
+            ib_host, ib_port,
+            clientId=ib_client_id,
+            readonly=True, timeout=10,
+        )
+        account = ib.managedAccounts()[0]
+
+        # Verify account matches
+        if account != state["account"]:
+            discrepancies.append({
+                "field": "account",
+                "expected": state["account"],
+                "actual": account,
+                "severity": "CRITICAL",
+            })
+
+        # Get current positions
+        pos_map = {}
+        for p in ib.positions():
+            shares = float(p.position)
+            if shares != 0:
+                sym = p.contract.symbol
+                pos_map[sym] = pos_map.get(sym, 0) + shares
+
+        # Get current cash
+        current_cash = 0
+        for av in ib.accountSummary():
+            if (av.currency == "USD"
+                    and av.tag == "TotalCashValue"):
+                try:
+                    current_cash = float(av.value)
+                except (ValueError, TypeError):
+                    pass
+
+        # Check open orders
+        open_orders = len(ib.openTrades())
+
+        ib.disconnect()
+    except Exception as e:
+        print(f"IB connection failed: {e}")
+        return {
+            "valid": False,
+            "state": state,
+            "discrepancies": [{
+                "field": "ib_connection",
+                "expected": "connected",
+                "actual": str(e),
+                "severity": "CRITICAL",
+            }],
+            "current_state": None,
+        }
+
+    # Compare positions
+    expected_pos = state["pre_trade_state"]["positions"]
+    expected_tickers = set(expected_pos.keys())
+    actual_tickers = set(pos_map.keys())
+
+    # Missing positions (expected but not in IB)
+    for ticker in expected_tickers - actual_tickers:
+        exp_shares = expected_pos[ticker]["shares"]
+        discrepancies.append({
+            "field": f"position:{ticker}",
+            "expected": f"{exp_shares:.0f} shares",
+            "actual": "not held",
+            "severity": "CRITICAL",
+        })
+
+    # Unexpected positions (in IB but not expected)
+    for ticker in actual_tickers - expected_tickers:
+        discrepancies.append({
+            "field": f"position:{ticker}",
+            "expected": "not held",
+            "actual": f"{pos_map[ticker]:.0f} shares",
+            "severity": "CRITICAL",
+        })
+
+    # Share count mismatches
+    for ticker in expected_tickers & actual_tickers:
+        exp_shares = expected_pos[ticker]["shares"]
+        act_shares = pos_map[ticker]
+        if abs(exp_shares - act_shares) > 0.5:
+            discrepancies.append({
+                "field": f"position:{ticker}",
+                "expected": f"{exp_shares:.0f} shares",
+                "actual": f"{act_shares:.0f} shares",
+                "severity": "CRITICAL",
+            })
+
+    # Check for shorts
+    for ticker, shares in pos_map.items():
+        if shares < 0:
+            discrepancies.append({
+                "field": f"short:{ticker}",
+                "expected": "no shorts",
+                "actual": f"{shares:.0f} shares",
+                "severity": "CRITICAL",
+            })
+
+    # Check cash (with tolerance)
+    expected_cash = state["pre_trade_state"]["cash"]
+    if expected_cash > 0:
+        cash_diff_pct = (
+            abs(current_cash - expected_cash) / expected_cash * 100
+        )
+        if cash_diff_pct > cash_tolerance_pct:
+            severity = (
+                "CRITICAL" if cash_diff_pct > 10
+                else "WARNING"
+            )
+            discrepancies.append({
+                "field": "cash",
+                "expected": f"${expected_cash:,.0f}",
+                "actual": f"${current_cash:,.0f}"
+                          f" ({cash_diff_pct:+.1f}%)",
+                "severity": severity,
+            })
+
+    # Check open orders (should be 0 after cleanup)
+    if open_orders > 0:
+        discrepancies.append({
+            "field": "open_orders",
+            "expected": "0",
+            "actual": str(open_orders),
+            "severity": "CRITICAL",
+        })
+
+    # Verify checksums
+    live_dir = state_path.parent
+    for label, filename in [
+        ("trade_plan_csv", "trade_plan.csv"),
+        ("target_portfolio_csv", "target_portfolio_latest.csv"),
+    ]:
+        expected_hash = state.get("checksums", {}).get(label)
+        if expected_hash:
+            fpath = live_dir / filename
+            if fpath.exists():
+                actual_hash = (
+                    "sha256:"
+                    + hashlib.sha256(
+                        fpath.read_bytes()
+                    ).hexdigest()
+                )
+                if actual_hash != expected_hash:
+                    discrepancies.append({
+                        "field": f"checksum:{filename}",
+                        "expected": expected_hash[:20] + "...",
+                        "actual": actual_hash[:20] + "...",
+                        "severity": "CRITICAL",
+                    })
+
+    # Print summary
+    critical = [
+        d for d in discrepancies if d["severity"] == "CRITICAL"
+    ]
+    warnings = [
+        d for d in discrepancies if d["severity"] == "WARNING"
+    ]
+    valid = len(critical) == 0
+
+    print(f"\n{'═' * 50}")
+    if valid:
+        print("STATE VERIFICATION: PASSED")
+    else:
+        print("STATE VERIFICATION: FAILED")
+    print(f"{'═' * 50}")
+    print(
+        f"  Positions: {len(expected_tickers)} expected,"
+        f" {len(actual_tickers)} actual"
+    )
+    print(
+        f"  Cash: ${current_cash:,.0f}"
+        f" (expected ${expected_cash:,.0f})"
+    )
+    print(f"  Open orders: {open_orders}")
+
+    if critical:
+        print(f"\n  CRITICAL issues ({len(critical)}):")
+        for d in critical:
+            print(
+                f"    {d['field']}: expected={d['expected']},"
+                f" actual={d['actual']}"
+            )
+    if warnings:
+        print(f"\n  Warnings ({len(warnings)}):")
+        for d in warnings:
+            print(
+                f"    {d['field']}: expected={d['expected']},"
+                f" actual={d['actual']}"
+            )
+    if not discrepancies:
+        print("  No discrepancies found")
+
+    print(f"{'═' * 50}")
+
+    current_state = {
+        "positions": pos_map,
+        "cash": current_cash,
+        "open_orders": open_orders,
+    }
+
+    return {
+        "valid": valid,
+        "state": state,
+        "discrepancies": discrepancies,
+        "current_state": current_state,
+    }
+
+
+def generate_reversal_trades(
+    account_state: dict,
+    target_weights: "pd.Series" = None,
+    cash_reserve: float = 70_000,
+) -> list:
+    """Generate trades to flatten the account back to a safe state.
+
+    Covers all short positions and optionally sells excess longs to
+    restore a positive cash balance with the specified reserve.
+
+    Args:
+        account_state: Output from get_account_state().
+        target_weights: If provided, keeps positions matching targets.
+            If None, closes ALL positions (full liquidation to cash).
+        cash_reserve: Minimum cash to maintain after reversal.
+
+    Returns:
+        List of trade dicts for execute_trades().
+    """
+    trades = []
+
+    # Phase 1: Cover ALL short positions (mandatory)
+    for p in account_state["short_positions"]:
+        shares = int(abs(p["shares"]))
+        trades.append({
+            "ticker": p["ticker"],
+            "action": "BUY_TO_COVER",
+            "order_type": "MARKET",
+            "shares": shares,
+            "limit_price": None,
+            "ref_price": p["avg_cost"],
+            "note": f"Cover short ({p['shares']:.0f} shares)",
+        })
+
+    if target_weights is None:
+        # Full liquidation — sell everything
+        for p in account_state["long_positions"]:
+            if p["ticker"] == "IBKR":
+                continue
+            shares = int(p["shares"])
+            if shares > 0:
+                trades.append({
+                    "ticker": p["ticker"],
+                    "action": "SELL",
+                    "order_type": "MARKET",
+                    "shares": shares,
+                    "limit_price": None,
+                    "ref_price": p["avg_cost"],
+                    "note": f"Liquidate long ({shares} shares)",
+                })
+    else:
+        # Selective: sell positions NOT in target, trim oversized positions
+        targets = target_weights.to_dict()
+        nlv = account_state["nlv"]
+
+        for p in account_state["long_positions"]:
+            ticker = p["ticker"]
+            if ticker == "IBKR":
+                continue
+            shares = int(p["shares"])
+            tw = targets.get(ticker, 0)
+
+            if tw == 0:
+                # Not in target — sell all
+                trades.append({
+                    "ticker": ticker,
+                    "action": "SELL",
+                    "order_type": "MARKET",
+                    "shares": shares,
+                    "limit_price": None,
+                    "ref_price": p["avg_cost"],
+                    "note": f"Not in target — sell all ({shares})",
+                })
+            else:
+                # In target — check if oversized
+                target_shares = int(tw * nlv / p["avg_cost"])
+                excess = shares - target_shares
+                if excess > 0:
+                    trades.append({
+                        "ticker": ticker,
+                        "action": "SELL",
+                        "order_type": "MARKET",
+                        "shares": excess,
+                        "limit_price": None,
+                        "ref_price": p["avg_cost"],
+                        "note": f"Trim excess ({shares} → {target_shares})",
+                    })
+
+    # Summary
+    cover_cost = sum(
+        t["shares"] * t["ref_price"]
+        for t in trades if t["action"] == "BUY_TO_COVER"
+    )
+    sell_proceeds = sum(
+        t["shares"] * t["ref_price"]
+        for t in trades if t["action"] == "SELL"
+    )
+
+    print(f"\nReversal plan: {len(trades)} trades")
+    covers = [t for t in trades if t["action"] == "BUY_TO_COVER"]
+    sells = [t for t in trades if t["action"] == "SELL"]
+    if covers:
+        print(f"  Cover {len(covers)} shorts: ~${cover_cost:,.0f}")
+    if sells:
+        print(f"  Sell {len(sells)} positions: ~${sell_proceeds:,.0f}")
+    net = sell_proceeds - cover_cost
+    print(f"  Estimated net cash change: ${net:+,.0f}")
+    est_cash = account_state["cash"] + net
+    print(f"  Estimated cash after: ~${est_cash:,.0f}")
+
+    return trades
+
+
 def load_trade_plan(trade_plan_file: Path) -> list:
     """Load trade plan from CSV file."""
     trades = []
@@ -195,25 +689,152 @@ def execute_trades(
     from ib_insync import IB, Stock, Order, LimitOrder, MarketOrder
 
     ib = IB()
-    ib.connect(ib_host, ib_port, clientId=ib_client_id, readonly=False, timeout=10)
-    print(f"Connected for trading: {ib.managedAccounts()[0]}")
-    order_mode = "LIMIT (GTC)" if use_limit_orders else "MARKET"
+    ib.connect(
+        ib_host, ib_port,
+        clientId=ib_client_id, readonly=False, timeout=10,
+    )
+    acct = ib.managedAccounts()[0]
+    print(f"Connected for trading: {acct}")
+    order_mode = (
+        "LIMIT (GTC)" if use_limit_orders else "MARKET"
+    )
     print(f"Order mode: {order_mode}")
     if use_limit_orders:
-        print(f"Limit buffer: {limit_buffer_pct}% from last close")
-    print()
+        print(
+            f"Limit buffer: {limit_buffer_pct}%"
+            " from last close"
+        )
+
+    # ── SAFETY: snapshot positions + cancel duplicates ──
+    pos_map = {}
+    for p in ib.positions():
+        sym = p.contract.symbol
+        pos_map[sym] = pos_map.get(sym, 0) + float(p.position)
+
+    trade_tickers = set(
+        t["ticker"] for t in final_trades
+        if t["action"] != "SKIP"
+    )
+    existing_orders = ib.openTrades()
+    cancelled = 0
+    for ot in existing_orders:
+        sym = ot.contract.symbol
+        if sym in trade_tickers:
+            print(
+                f"  CANCEL duplicate: {ot.order.action}"
+                f" {int(ot.order.totalQuantity)} {sym}"
+                f" ({ot.order.orderType})"
+            )
+            ib.cancelOrder(ot.order)
+            cancelled += 1
+    if cancelled:
+        ib.sleep(2)
+        print(
+            f"  Cancelled {cancelled} existing orders"
+            " to prevent duplicates\n"
+        )
+
+    # Get account cash for buy budget check
+    cash_available = 0
+    for av in ib.accountSummary():
+        if (av.currency == "USD"
+                and av.tag == "TotalCashValue"):
+            try:
+                cash_available = float(av.value)
+            except (ValueError, TypeError):
+                pass
+
+    print(
+        f"  Cash available: ${cash_available:,.0f}"
+    )
+    print(
+        f"  Positions: {len(pos_map)} tickers\n"
+    )
 
     exec_results = []
     trailing_stops_placed = 0
+    cumulative_buy_spend = 0
 
     for t in final_trades:
         if t["action"] == "SKIP":
             continue
 
         ticker = t["ticker"]
-        ib_action = "BUY" if t["action"] in ("BUY", "BUY_TO_COVER") else "SELL"
+        is_buy = t["action"] in ("BUY", "BUY_TO_COVER")
+        ib_action = "BUY" if is_buy else "SELL"
         shares = t["shares"]
         order_type = t.get("order_type", "MARKET")
+
+        # ── SAFETY: prevent short selling ──────────
+        if not is_buy:
+            held = pos_map.get(ticker, 0)
+            if held <= 0:
+                print(
+                    f"  {ticker}: BLOCKED — would go"
+                    f" short (hold {held:.0f},"
+                    f" sell {shares})"
+                )
+                exec_results.append({
+                    "ticker": ticker,
+                    "status": "BLOCKED_SHORT",
+                    "message": (
+                        f"Hold {held:.0f},"
+                        f" sell {shares} = short"
+                    ),
+                })
+                continue
+            if shares > held:
+                print(
+                    f"  {ticker}: REDUCED — hold"
+                    f" {held:.0f}, sell capped"
+                    f" from {shares}"
+                )
+                shares = int(held)
+
+        # ── SAFETY: prevent negative cash ──────────
+        if is_buy:
+            ref = (
+                t.get("ref_price")
+                or t.get("limit_price")
+                or 0
+            )
+            est_cost = shares * ref if ref else 0
+            headroom = cash_available - cumulative_buy_spend
+            if headroom <= 0:
+                print(
+                    f"  {ticker}: BLOCKED — no cash"
+                    f" left (${headroom:,.0f})"
+                )
+                exec_results.append({
+                    "ticker": ticker,
+                    "status": "BLOCKED_CASH",
+                    "message": "No cash remaining",
+                })
+                continue
+            if est_cost > headroom and ref > 0:
+                old_shares = shares
+                shares = int(headroom / ref)
+                if shares <= 0:
+                    print(
+                        f"  {ticker}: BLOCKED — cost"
+                        f" ${est_cost:,.0f} > cash"
+                        f" ${headroom:,.0f}"
+                    )
+                    exec_results.append({
+                        "ticker": ticker,
+                        "status": "BLOCKED_CASH",
+                        "message": (
+                            f"Cost ${est_cost:,.0f}"
+                            f" > cash ${headroom:,.0f}"
+                        ),
+                    })
+                    continue
+                est_cost = shares * ref
+                print(
+                    f"  {ticker}: REDUCED {old_shares}"
+                    f" → {shares} shares (cash cap)"
+                )
+            cumulative_buy_spend += est_cost
 
         contract = Stock(ticker, "SMART", "USD")
         try:
@@ -241,8 +862,11 @@ def execute_trades(
                 effective_type = "MARKET"
                 limit_px = None
             else:
-                is_buy = ib_action == "BUY"
-                buf = 1 + limit_buffer_pct / 100 if is_buy else 1 - limit_buffer_pct / 100
+                buf = (
+                    1 + limit_buffer_pct / 100
+                    if is_buy
+                    else 1 - limit_buffer_pct / 100
+                )
                 limit_px = round(ref_price * buf, 2)
                 order = LimitOrder(ib_action, shares, limit_px)
                 order.tif = "GTC"
@@ -271,9 +895,22 @@ def execute_trades(
 
         exec_results.append({
             "ticker": ticker, "status": status,
-            "order_id": trade_obj.order.orderId, "fill_price": fill,
-            "limit_price": limit_px, "order_type": effective_type,
+            "order_id": trade_obj.order.orderId,
+            "fill_price": fill,
+            "limit_price": limit_px,
+            "order_type": effective_type,
         })
+
+        # Update position map after trade
+        if status in ("Filled", "Submitted", "PreSubmitted"):
+            if is_buy:
+                pos_map[ticker] = (
+                    pos_map.get(ticker, 0) + shares
+                )
+            else:
+                pos_map[ticker] = (
+                    pos_map.get(ticker, 0) - shares
+                )
 
         # TRAILING STOP on every BUY fill
         # For LIMIT GTC orders, the stop is placed when order is accepted
@@ -559,9 +1196,20 @@ def fix_unfilled_orders(
     from ib_insync import IB, Stock, Order, LimitOrder, MarketOrder
 
     ib = IB()
-    ib.connect(ib_host, ib_port, clientId=ib_client_id, readonly=False, timeout=10)
+    ib.connect(
+        ib_host, ib_port,
+        clientId=ib_client_id, readonly=False, timeout=10,
+    )
     account = ib.managedAccounts()[0]
     print(f"Connected for trading: {account}\n")
+
+    # ── SAFETY: snapshot positions for short check ──
+    pos_map = {}
+    for p in ib.positions():
+        sym = p.contract.symbol
+        pos_map[sym] = (
+            pos_map.get(sym, 0) + float(p.position)
+        )
 
     # Phase 1: Cancel stale orders
     cancelled = 0
@@ -623,6 +1271,32 @@ def fix_unfilled_orders(
         is_buy = action in ("BUY", "BUY_TO_COVER")
         ib_action = "BUY" if is_buy else "SELL"
         shares = t["shares"]
+
+        # ── SAFETY: prevent short selling ──────────
+        if not is_buy:
+            held = pos_map.get(ticker, 0)
+            if held <= 0:
+                print(
+                    f"  {ticker}: BLOCKED — would go"
+                    f" short (hold {held:.0f},"
+                    f" sell {shares})"
+                )
+                exec_results.append({
+                    "ticker": ticker,
+                    "status": "BLOCKED_SHORT",
+                    "message": (
+                        f"Hold {held:.0f},"
+                        f" sell {shares}"
+                    ),
+                })
+                continue
+            if shares > held:
+                print(
+                    f"  {ticker}: REDUCED — hold"
+                    f" {held:.0f}, sell capped"
+                    f" from {shares}"
+                )
+                shares = int(held)
 
         contract = resubmit_contracts.get(ticker)
         if not contract:
@@ -731,3 +1405,179 @@ def fix_unfilled_orders(
 
     ib.disconnect()
     return exec_results
+
+
+def verify_execution(
+    state_file: Path,
+    ib_host: str = "127.0.0.1",
+    ib_port: int = 4001,
+    ib_client_id: int = 16,
+    cash_tolerance_pct: float = 5.0,
+) -> dict:
+    """Verify post-trade positions match expected state.
+
+    Run after market hours once all orders should have filled.
+
+    Returns:
+        dict with complete (bool), matches, mismatches,
+        unexpected, pending_orders, cash comparison.
+    """
+    from ib_insync import IB
+
+    state_path = Path(state_file)
+    if not state_path.exists():
+        print("State file not found — cannot verify execution")
+        return {"complete": False, "matches": [], "mismatches": [],
+                "unexpected": [], "pending_orders": [],
+                "estimated_cash_diff": 0}
+
+    with open(state_path) as f:
+        state = json.load(f)
+
+    expected = state["expected_post_trade"]
+    expected_pos = expected["positions"]
+    expected_cash = expected["estimated_cash"]
+
+    ib = IB()
+    try:
+        ib.connect(
+            ib_host, ib_port,
+            clientId=ib_client_id,
+            readonly=True, timeout=10,
+        )
+        account = ib.managedAccounts()[0]
+        print(f"Connected (read-only): {account}")
+
+        # Current positions
+        pos_map = {}
+        for p in ib.positions():
+            shares = float(p.position)
+            if shares != 0:
+                sym = p.contract.symbol
+                pos_map[sym] = pos_map.get(sym, 0) + shares
+
+        # Current cash
+        current_cash = 0
+        for av in ib.accountSummary():
+            if (av.currency == "USD"
+                    and av.tag == "TotalCashValue"):
+                try:
+                    current_cash = float(av.value)
+                except (ValueError, TypeError):
+                    pass
+
+        # Pending orders
+        pending_orders = []
+        for t in ib.openTrades():
+            if t.order.orderType != "TRAIL":
+                pending_orders.append({
+                    "ticker": t.contract.symbol,
+                    "action": t.order.action,
+                    "shares": int(t.order.totalQuantity),
+                    "order_type": t.order.orderType,
+                    "tif": t.order.tif,
+                    "status": t.orderStatus.status,
+                    "filled_qty": int(t.orderStatus.filled),
+                    "remaining": int(t.orderStatus.remaining),
+                })
+
+        ib.disconnect()
+    except Exception as e:
+        print(f"IB connection failed: {e}")
+        return {"complete": False, "matches": [], "mismatches": [],
+                "unexpected": [], "pending_orders": [],
+                "estimated_cash_diff": 0}
+
+    # Compare positions
+    matches = []
+    mismatches = []
+    unexpected = []
+
+    expected_tickers = set(expected_pos.keys())
+    actual_tickers = set(pos_map.keys())
+
+    for ticker in expected_tickers:
+        exp_shares = expected_pos[ticker]["shares"]
+        act_shares = pos_map.get(ticker, 0)
+        entry = {
+            "ticker": ticker,
+            "expected_shares": exp_shares,
+            "actual_shares": act_shares,
+        }
+        if abs(exp_shares - act_shares) < 0.5:
+            matches.append(entry)
+        else:
+            entry["diff"] = act_shares - exp_shares
+            mismatches.append(entry)
+
+    for ticker in actual_tickers - expected_tickers:
+        # IBKR stock is expected to remain
+        if ticker == "IBKR":
+            continue
+        unexpected.append({
+            "ticker": ticker,
+            "shares": pos_map[ticker],
+        })
+
+    cash_diff = current_cash - expected_cash
+    complete = (
+        len(mismatches) == 0
+        and len(unexpected) == 0
+        and len(pending_orders) == 0
+    )
+
+    # Print summary
+    print(f"\n{'═' * 50}")
+    if complete:
+        print("EXECUTION VERIFICATION: COMPLETE")
+    else:
+        print("EXECUTION VERIFICATION: INCOMPLETE")
+    print(f"{'═' * 50}")
+    print(
+        f"  Positions matched:  {len(matches)}"
+        f" / {len(expected_tickers)}"
+    )
+    if mismatches:
+        print(f"  Mismatches:         {len(mismatches)}")
+        for m in mismatches:
+            print(
+                f"    {m['ticker']:<6}"
+                f" expected={m['expected_shares']:.0f}"
+                f" actual={m['actual_shares']:.0f}"
+                f" (diff={m['diff']:+.0f})"
+            )
+    if unexpected:
+        print(f"  Unexpected:         {len(unexpected)}")
+        for u in unexpected:
+            print(
+                f"    {u['ticker']:<6}"
+                f" {u['shares']:.0f} shares"
+            )
+    if pending_orders:
+        print(
+            f"  Pending orders:     {len(pending_orders)}"
+        )
+        for o in pending_orders:
+            print(
+                f"    {o['action']} {o['shares']}"
+                f" {o['ticker']}"
+                f" ({o['order_type']} {o['tif']})"
+                f" — {o['status']}"
+            )
+    print(
+        f"  Cash: ${current_cash:,.0f}"
+        f" (expected ${expected_cash:,.0f},"
+        f" diff ${cash_diff:+,.0f})"
+    )
+    print(f"{'═' * 50}")
+
+    return {
+        "complete": complete,
+        "matches": matches,
+        "mismatches": mismatches,
+        "unexpected": unexpected,
+        "pending_orders": pending_orders,
+        "estimated_cash_diff": cash_diff,
+        "current_cash": current_cash,
+        "expected_cash": expected_cash,
+    }
