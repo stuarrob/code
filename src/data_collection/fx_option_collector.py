@@ -1,10 +1,13 @@
 """
 FX Option Surface Collector
 
-Captures point-in-time snapshots of PHLX FX option surfaces from
-Interactive Brokers Gateway. Collects bid/ask/mid prices and Greeks
+Captures point-in-time snapshots of CME FX futures option surfaces from
+Interactive Brokers Gateway. Collects mid prices and Greeks
 (delta, gamma, vega, theta, implied volatility) for all major currency
-pairs with maturities up to 1 year.
+pairs across all available maturities.
+
+Uses options on CME currency futures (EUR→6E, GBP→6B, etc.) traded on CME.
+Queries multiple futures months to build a full term-structure surface.
 
 Each run produces a snapshot that is appended to per-currency parquet
 files, building a historical volatility surface over time.
@@ -20,7 +23,7 @@ Usage:
     surface_df, results_df = collector.collect_all()
 
 Rate limits:
-    Uses reqTickers (market data snapshots), not reqHistoricalData.
+    Uses reqMktData (market data snapshots), not reqHistoricalData.
     IB allows ~100 concurrent market data lines.
     Requests are batched at 90, with 2s pause between batches.
     Full collection (~2,880 contracts) takes ~10-15 minutes.
@@ -34,26 +37,29 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
-from ib_insync import IB, Contract, Forex, Option
+from ib_insync import IB, Future, FuturesOption
 
 # ------------------------------------------------------------------
-# Currency pair configuration
+# Currency pair configuration — CME FX futures
+#
+# IB uses the currency code as symbol (EUR, not 6E).
+# The localSymbol (6EH6, 6BM6, etc.) is assigned by IB automatically.
 # ------------------------------------------------------------------
 
 FX_PAIRS = {
-    "EUR": {"pair": "EURUSD", "contract_size": 10_000},
-    "GBP": {"pair": "GBPUSD", "contract_size": 10_000},
-    "AUD": {"pair": "AUDUSD", "contract_size": 10_000},
-    "CAD": {"pair": "USDCAD", "contract_size": 10_000},
-    "CHF": {"pair": "USDCHF", "contract_size": 10_000},
-    "JPY": {"pair": "USDJPY", "contract_size": 1_000_000},
+    "EUR": {"symbol": "EUR", "exchange": "CME", "multiplier": 125_000},
+    "GBP": {"symbol": "GBP", "exchange": "CME", "multiplier": 62_500},
+    "AUD": {"symbol": "AUD", "exchange": "CME", "multiplier": 100_000},
+    "CAD": {"symbol": "CAD", "exchange": "CME", "multiplier": 100_000},
+    "CHF": {"symbol": "CHF", "exchange": "CME", "multiplier": 125_000},
+    "JPY": {"symbol": "JPY", "exchange": "CME", "multiplier": 12_500_000},
 }
 
 ALL_CURRENCIES = list(FX_PAIRS.keys())
 
 
 class FXOptionCollector:
-    """Snapshot collector for PHLX FX option surfaces."""
+    """Snapshot collector for CME FX futures option surfaces."""
 
     def __init__(
         self,
@@ -64,7 +70,7 @@ class FXOptionCollector:
         batch_size: int = 90,
         batch_pause: float = 2.0,
         snapshot_timeout: float = 10,
-        max_maturity_days: int = 365,
+        max_maturity_days: int = 730,
         strike_filter_pct: float = 0.15,
         currencies: Optional[List[str]] = None,
     ):
@@ -80,7 +86,7 @@ class FXOptionCollector:
         self.manifest_path = self.cache_dir / "manifest.csv"
 
     # ------------------------------------------------------------------
-    # Logging (same pattern as IBDataCollector)
+    # Logging
     # ------------------------------------------------------------------
 
     def _log(self, msg: str):
@@ -133,7 +139,7 @@ class FXOptionCollector:
             return "missing", None
 
     # ------------------------------------------------------------------
-    # Spot price retrieval
+    # Price validation
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -146,160 +152,179 @@ class FXOptionCollector:
         except (TypeError, ValueError):
             return False
 
-    def _get_spot_prices(self) -> Dict[str, float]:
-        """Get current spot prices for configured currency pairs.
-
-        Returns dict mapping currency code to spot rate.
-        """
-        spots = {}
-        contracts = []
-        currency_order = []
-
-        for ccy in self.currencies:
-            pair_info = FX_PAIRS[ccy]
-            pair = pair_info["pair"]
-            fx = Forex(pair)
-            contracts.append(fx)
-            currency_order.append(ccy)
-
-        qualified = self.ib.qualifyContracts(*contracts)
-        if not qualified:
-            self._log("WARNING: Could not qualify any FX contracts")
-            return spots
-
-        # Request frozen+delayed data (works outside market hours)
-        self.ib.reqMarketDataType(4)
-
-        # Use reqMktData + ib.sleep for proper event processing
-        tickers = []
-        for con in qualified:
-            ticker = self.ib.reqMktData(con, "", False, False)
-            tickers.append(ticker)
-
-        self.ib.sleep(3)  # Process events for up to 3 seconds
-
-        for ccy, con, ticker in zip(currency_order, qualified, tickers):
-            mid = None
-            if self._valid_price(ticker.bid) and self._valid_price(ticker.ask):
-                mid = (ticker.bid + ticker.ask) / 2
-            elif self._valid_price(ticker.last):
-                mid = ticker.last
-            elif self._valid_price(ticker.close):
-                mid = ticker.close
-            elif self._valid_price(ticker.marketPrice()):
-                mid = ticker.marketPrice()
-
-            if mid and mid > 0:
-                spots[ccy] = mid
-                self._log(f"{ccy}: spot = {mid:.5f}")
-            else:
-                self._log(
-                    f"{ccy}: WARNING - no spot price "
-                    f"(bid={ticker.bid} ask={ticker.ask} last={ticker.last} close={ticker.close})"
-                )
-
-            self.ib.cancelMktData(con)
-
-        return spots
-
     # ------------------------------------------------------------------
-    # Option chain discovery
+    # Underlying futures discovery and pricing
     # ------------------------------------------------------------------
 
-    def _get_option_chains(
-        self, spots: Dict[str, float]
-    ) -> Dict[str, dict]:
-        """Get option chain parameters for each currency pair.
+    def _get_futures_months(self, currency: str) -> List[dict]:
+        """Discover futures contract months for a currency.
 
-        Calls reqSecDefOptParams for each currency and filters for PHLX.
-        Returns dict with expirations, strikes, tradingClass per currency.
+        Returns list of dicts with contract, conId, expiry, price
+        for each month within max_maturity_days.
         """
-        chains = {}
+        pair_info = FX_PAIRS[currency]
+        sym = pair_info["symbol"]
+        exchange = pair_info["exchange"]
         today = datetime.now().date()
         max_date = today + timedelta(days=self.max_maturity_days)
 
-        for ccy in self.currencies:
-            if ccy not in spots:
-                self._log(f"{ccy}: skipping chain (no spot price)")
-                continue
+        generic = Future(symbol=sym, exchange=exchange)
+        try:
+            details_list = self.ib.reqContractDetails(generic)
+        except Exception as e:
+            self._log(f"{currency}: failed to get futures details: {e}")
+            return []
 
-            pair_info = FX_PAIRS[ccy]
-            pair = pair_info["pair"]
+        if not details_list:
+            self._log(f"{currency}: no futures contracts found for {sym} on {exchange}")
+            return []
 
-            # Qualify the underlying to get conId
-            fx = Forex(pair)
-            qualified = self.ib.qualifyContracts(fx)
-            if not qualified:
-                self._log(f"{ccy}: could not qualify underlying {pair}")
-                continue
-
-            con_id = fx.conId
-
-            # Request option chain parameters
-            all_chains = self.ib.reqSecDefOptParams(
-                ccy, "", "CASH", con_id
-            )
-
-            if not all_chains:
-                # Try with the full pair symbol
-                all_chains = self.ib.reqSecDefOptParams(
-                    pair[:3], "", "CASH", con_id
-                )
-
-            if not all_chains:
-                self._log(f"{ccy}: no option chains returned")
-                continue
-
-            # Filter for PHLX exchange
-            phlx_chains = [c for c in all_chains if c.exchange == "PHLX"]
-
-            if not phlx_chains:
-                # Try any available exchange
-                exchanges = set(c.exchange for c in all_chains)
-                self._log(
-                    f"{ccy}: no PHLX chain found. Available: {exchanges}"
-                )
-                # Use the first available exchange
-                if all_chains:
-                    phlx_chains = [all_chains[0]]
-                    self._log(f"{ccy}: falling back to {all_chains[0].exchange}")
-                else:
+        # Filter to contracts expiring within range
+        months = []
+        for d in details_list:
+            exp_str = d.contract.lastTradeDateOrContractMonth
+            try:
+                exp_date = datetime.strptime(exp_str[:8], "%Y%m%d").date()
+            except ValueError:
+                try:
+                    exp_date = datetime.strptime(exp_str[:6], "%Y%m").date()
+                except ValueError:
                     continue
 
-            chain = phlx_chains[0]
+            if today < exp_date <= max_date:
+                months.append({
+                    "contract": d.contract,
+                    "conId": d.contract.conId,
+                    "expiry": exp_date,
+                    "localSymbol": d.contract.localSymbol,
+                    "price": None,
+                })
 
-            # Filter expirations within max_maturity_days
-            valid_exps = sorted(
-                exp
-                for exp in chain.expirations
-                if datetime.strptime(exp, "%Y%m%d").date() <= max_date
-                and datetime.strptime(exp, "%Y%m%d").date() > today
+        months.sort(key=lambda x: x["expiry"])
+        self._log(
+            f"{currency}: {len(months)} futures months "
+            f"(of {len(details_list)} total)"
+        )
+
+        # Fetch prices for all months
+        if months:
+            self.ib.reqMarketDataType(4)  # Frozen+delayed
+
+            tickers = {}
+            for m in months:
+                ticker = self.ib.reqMktData(m["contract"], "", False, False)
+                tickers[m["conId"]] = (m, ticker)
+
+            self.ib.sleep(3)
+
+            for con_id, (m, ticker) in tickers.items():
+                mid = None
+                if self._valid_price(ticker.bid) and self._valid_price(ticker.ask):
+                    mid = (ticker.bid + ticker.ask) / 2
+                elif self._valid_price(ticker.last):
+                    mid = ticker.last
+                elif self._valid_price(ticker.close):
+                    mid = ticker.close
+                elif self._valid_price(ticker.marketPrice()):
+                    mid = ticker.marketPrice()
+
+                if mid and mid > 0:
+                    m["price"] = mid
+
+                self.ib.cancelMktData(m["contract"])
+
+            # Keep only months with prices
+            priced = [m for m in months if m["price"] is not None]
+            if priced:
+                self._log(
+                    f"{currency}: {len(priced)} months with prices, "
+                    f"front={priced[0]['localSymbol']} @ {priced[0]['price']:.5f}"
+                )
+            else:
+                self._log(f"{currency}: WARNING - no futures prices obtained")
+            return priced
+
+        return months
+
+    # ------------------------------------------------------------------
+    # Option chain discovery (across multiple futures months)
+    # ------------------------------------------------------------------
+
+    def _get_option_chains(
+        self, currency: str, futures_months: List[dict]
+    ) -> List[dict]:
+        """Get option chains for a currency across all futures months.
+
+        For each futures month, calls reqSecDefOptParams and picks the
+        chain with the most strikes (standard monthly, typically EUU-class).
+
+        Returns list of chain dicts, each with:
+            futures_conId, futures_price, futures_expiry,
+            exchange, tradingClass, multiplier,
+            expirations, strikes
+        """
+        pair_info = FX_PAIRS[currency]
+        sym = pair_info["symbol"]
+        exchange = pair_info["exchange"]
+        today = datetime.now().date()
+        max_date = today + timedelta(days=self.max_maturity_days)
+
+        all_chains = []
+
+        for m in futures_months:
+            raw_chains = self.ib.reqSecDefOptParams(
+                sym, exchange, "FUT", m["conId"]
             )
 
-            # Filter strikes around spot
-            spot = spots[ccy]
-            lo = spot * (1 - self.strike_filter_pct)
-            hi = spot * (1 + self.strike_filter_pct)
-            valid_strikes = sorted(s for s in chain.strikes if lo <= s <= hi)
+            if not raw_chains:
+                continue
 
-            chains[ccy] = {
-                "conId": con_id,
-                "exchange": chain.exchange,
-                "tradingClass": chain.tradingClass,
-                "multiplier": chain.multiplier,
+            # Pick the standard chain (most strikes = widest strike range)
+            best = max(raw_chains, key=lambda c: len(c.strikes))
+
+            # Filter expirations
+            valid_exps = sorted(
+                exp for exp in best.expirations
+                if datetime.strptime(exp, "%Y%m%d").date() > today
+                and datetime.strptime(exp, "%Y%m%d").date() <= max_date
+            )
+
+            if not valid_exps:
+                continue
+
+            # Filter strikes around futures price
+            price = m["price"]
+            lo = price * (1 - self.strike_filter_pct)
+            hi = price * (1 + self.strike_filter_pct)
+            valid_strikes = sorted(
+                s for s in best.strikes if lo <= s <= hi
+            )
+
+            if not valid_strikes:
+                continue
+
+            all_chains.append({
+                "futures_conId": m["conId"],
+                "futures_price": m["price"],
+                "futures_expiry": m["expiry"],
+                "futures_localSymbol": m["localSymbol"],
+                "exchange": best.exchange,
+                "tradingClass": best.tradingClass,
+                "multiplier": best.multiplier,
                 "expirations": valid_exps,
                 "strikes": valid_strikes,
-                "all_strikes": len(chain.strikes),
-                "all_expirations": len(chain.expirations),
-            }
+            })
 
-            self._log(
-                f"{ccy}: {len(valid_exps)} expirations, "
-                f"{len(valid_strikes)} strikes (of {len(chain.strikes)} total) "
-                f"on {chain.exchange}, class={chain.tradingClass}"
-            )
-
-        return chains
+        total_exps = sum(len(c["expirations"]) for c in all_chains)
+        total_strikes = max(
+            (len(c["strikes"]) for c in all_chains), default=0
+        )
+        self._log(
+            f"{currency}: {len(all_chains)} futures months with options, "
+            f"{total_exps} total expirations, "
+            f"up to {total_strikes} strikes"
+        )
+        return all_chains
 
     # ------------------------------------------------------------------
     # Contract building
@@ -308,31 +333,33 @@ class FXOptionCollector:
     def _build_option_contracts(
         self,
         currency: str,
-        chain: dict,
+        chains: List[dict],
         batch_qualify_size: int = 50,
-    ) -> List[Option]:
-        """Build and qualify Option contracts for one currency.
+    ) -> List[Tuple[FuturesOption, float]]:
+        """Build and qualify FuturesOption contracts for one currency.
 
-        Returns list of qualified Option contracts.
+        Returns list of (qualified_contract, underlying_price) tuples.
         """
-        exchange = chain["exchange"]
-        trading_class = chain["tradingClass"]
-        multiplier = chain.get("multiplier", "100")
+        pair_info = FX_PAIRS[currency]
+        sym = pair_info["symbol"]
 
-        raw_contracts = []
-        for exp in chain["expirations"]:
-            for strike in chain["strikes"]:
-                for right in ["C", "P"]:
-                    opt = Option(
-                        symbol=currency,
-                        lastTradeDateOrContractMonth=exp,
-                        strike=strike,
-                        right=right,
-                        exchange=exchange,
-                        multiplier=str(multiplier),
-                        tradingClass=trading_class,
-                    )
-                    raw_contracts.append(opt)
+        raw_contracts = []  # (contract, underlying_price)
+        for chain in chains:
+            for exp in chain["expirations"]:
+                for strike in chain["strikes"]:
+                    for right in ["C", "P"]:
+                        opt = FuturesOption(
+                            symbol=sym,
+                            lastTradeDateOrContractMonth=exp,
+                            strike=strike,
+                            right=right,
+                            exchange=chain["exchange"],
+                            multiplier=str(chain["multiplier"]),
+                            tradingClass=chain["tradingClass"],
+                        )
+                        raw_contracts.append(
+                            (opt, chain["futures_price"])
+                        )
 
         if not raw_contracts:
             return []
@@ -341,11 +368,20 @@ class FXOptionCollector:
         qualified = []
         for i in range(0, len(raw_contracts), batch_qualify_size):
             batch = raw_contracts[i : i + batch_qualify_size]
+            contracts_only = [c for c, _ in batch]
+            price_map = {id(c): p for c, p in batch}
             try:
-                result = self.ib.qualifyContracts(*batch)
-                qualified.extend([c for c in result if c.conId > 0])
+                result = self.ib.qualifyContracts(*contracts_only)
+                for c in result:
+                    if c.conId > 0:
+                        # Find matching price from original batch
+                        idx = contracts_only.index(c)
+                        qualified.append((c, batch[idx][1]))
             except Exception as e:
-                self._log(f"{currency}: qualification error batch {i}: {e}")
+                self._log(
+                    f"{currency}: qualification error batch "
+                    f"{i // batch_qualify_size + 1}: {e}"
+                )
             time.sleep(0.5)
 
         self._log(
@@ -375,8 +411,6 @@ class FXOptionCollector:
         }
 
         greeks = None
-
-        # Prefer model greeks
         if hasattr(ticker, "modelGreeks") and ticker.modelGreeks:
             greeks = ticker.modelGreeks
         elif hasattr(ticker, "lastGreeks") and ticker.lastGreeks:
@@ -401,28 +435,30 @@ class FXOptionCollector:
     def _collect_currency_snapshot(
         self,
         currency: str,
-        contracts: List[Option],
-        spot_price: float,
+        contracts_with_prices: List[Tuple[FuturesOption, float]],
     ) -> pd.DataFrame:
         """Collect market data snapshot for all option contracts of one currency.
 
-        Requests tickers in batches, extracts prices and Greeks.
+        Args:
+            contracts_with_prices: List of (contract, underlying_price) tuples.
+
         Returns DataFrame with full option surface.
         """
-        if not contracts:
+        if not contracts_with_prices:
             return pd.DataFrame()
 
         now = datetime.now()
         rows = []
-        total_batches = math.ceil(len(contracts) / self.batch_size)
+        total_batches = math.ceil(
+            len(contracts_with_prices) / self.batch_size
+        )
 
-        # Request frozen+delayed data (works outside market hours)
         self.ib.reqMarketDataType(4)
 
         for batch_idx in range(total_batches):
             start = batch_idx * self.batch_size
-            end = min(start + self.batch_size, len(contracts))
-            batch = contracts[start:end]
+            end = min(start + self.batch_size, len(contracts_with_prices))
+            batch = contracts_with_prices[start:end]
 
             self._log(
                 f"{currency}: batch {batch_idx + 1}/{total_batches} "
@@ -430,67 +466,56 @@ class FXOptionCollector:
             )
 
             try:
-                # Use reqMktData for each contract, then ib.sleep to process
                 tickers = []
-                for con in batch:
+                for con, _ in batch:
                     ticker = self.ib.reqMktData(con, "", False, False)
                     tickers.append(ticker)
 
-                # Wait for data to populate (ib.sleep processes IB events)
                 self.ib.sleep(self.snapshot_timeout)
 
-                for ticker in tickers:
+                for (con, underlying_price), ticker in zip(batch, tickers):
                     contract = ticker.contract
                     greeks = self._extract_greeks(ticker)
 
-                    # Extract prices with validation
-                    bid = ticker.bid if self._valid_price(ticker.bid) else float("nan")
-                    ask = ticker.ask if self._valid_price(ticker.ask) else float("nan")
-                    last = ticker.last if self._valid_price(ticker.last) else float("nan")
-                    close = ticker.close if self._valid_price(ticker.close) else float("nan")
-
+                    # Compute mid price: prefer bid/ask midpoint,
+                    # fall back to last, then close
                     mid = float("nan")
-                    if not math.isnan(bid) and not math.isnan(ask):
+                    bid = ticker.bid if self._valid_price(ticker.bid) else None
+                    ask = ticker.ask if self._valid_price(ticker.ask) else None
+                    if bid is not None and ask is not None:
                         mid = (bid + ask) / 2
-                    elif not math.isnan(last):
-                        mid = last
-                    elif not math.isnan(close):
-                        mid = close
+                    elif self._valid_price(ticker.last):
+                        mid = ticker.last
+                    elif self._valid_price(ticker.close):
+                        mid = ticker.close
 
                     volume = ticker.volume if self._valid_price(ticker.volume) else 0
 
-                    # Calculate DTE
                     exp_str = contract.lastTradeDateOrContractMonth
                     exp_date = datetime.strptime(exp_str[:8], "%Y%m%d")
                     dte = (exp_date.date() - now.date()).days
 
-                    rows.append(
-                        {
-                            "timestamp": now,
-                            "currency": currency,
-                            "expiration": exp_str[:8],
-                            "dte": dte,
-                            "strike": contract.strike,
-                            "right": contract.right,
-                            "bid": bid,
-                            "ask": ask,
-                            "last": last,
-                            "mid": mid,
-                            "volume": int(volume),
-                            "impliedVol": greeks["impliedVol"],
-                            "delta": greeks["delta"],
-                            "gamma": greeks["gamma"],
-                            "vega": greeks["vega"],
-                            "theta": greeks["theta"],
-                            "underlyingPrice": spot_price,
-                            "moneyness": contract.strike / spot_price
-                            if spot_price > 0
-                            else float("nan"),
-                        }
-                    )
+                    rows.append({
+                        "timestamp": now,
+                        "currency": currency,
+                        "expiration": exp_str[:8],
+                        "dte": dte,
+                        "strike": contract.strike,
+                        "right": contract.right,
+                        "mid": mid,
+                        "volume": int(volume),
+                        "impliedVol": greeks["impliedVol"],
+                        "delta": greeks["delta"],
+                        "gamma": greeks["gamma"],
+                        "vega": greeks["vega"],
+                        "theta": greeks["theta"],
+                        "underlyingPrice": underlying_price,
+                        "moneyness": contract.strike / underlying_price
+                        if underlying_price > 0
+                        else float("nan"),
+                    })
 
-                # Cancel market data for this batch
-                for con in batch:
+                for con, _ in batch:
                     try:
                         self.ib.cancelMktData(con)
                     except Exception:
@@ -499,13 +524,11 @@ class FXOptionCollector:
             except Exception as e:
                 self._log(f"{currency}: batch {batch_idx + 1} error: {e}")
 
-            # Pause between batches
             if batch_idx < total_batches - 1:
                 time.sleep(self.batch_pause)
 
         df = pd.DataFrame(rows)
 
-        # Count non-NaN implied vols
         if not df.empty:
             iv_count = df["impliedVol"].notna().sum()
             delta_count = df["delta"].notna().sum()
@@ -521,11 +544,7 @@ class FXOptionCollector:
     # ------------------------------------------------------------------
 
     def _save_snapshot(self, currency: str, df: pd.DataFrame) -> str:
-        """Append snapshot to per-currency parquet file.
-
-        Reads existing file, concatenates new data, overwrites.
-        Returns log message.
-        """
+        """Append snapshot to per-currency parquet file."""
         path = self.cache_dir / f"{currency}.parquet"
 
         if path.exists():
@@ -538,7 +557,10 @@ class FXOptionCollector:
             combined = df
 
         combined.to_parquet(path, index=False)
-        return f"{currency}: saved {len(df)} new rows (total {len(combined)} in file)"
+        return (
+            f"{currency}: saved {len(df)} new rows "
+            f"(total {len(combined)} in file)"
+        )
 
     # ------------------------------------------------------------------
     # Single currency collection
@@ -551,47 +573,36 @@ class FXOptionCollector:
 
         Returns (DataFrame, log_message) or (None, error_message).
         """
-        # Get spot price
-        spots = self._get_spot_prices()
-        if currency not in spots:
-            return None, f"{currency}: no spot price available"
+        futures_months = self._get_futures_months(currency)
+        if not futures_months:
+            return None, f"{currency}: no futures months available"
 
-        spot = spots[currency]
+        chains = self._get_option_chains(currency, futures_months)
+        if not chains:
+            return None, f"{currency}: no option chains available"
 
-        # Get option chain
-        chains = self._get_option_chains(spots)
-        if currency not in chains:
-            return None, f"{currency}: no option chain available"
-
-        chain = chains[currency]
-
-        # Build contracts
-        contracts = self._build_option_contracts(currency, chain)
+        contracts = self._build_option_contracts(currency, chains)
         if not contracts:
             return None, f"{currency}: no contracts qualified"
 
-        # Collect snapshot
-        df = self._collect_currency_snapshot(currency, contracts, spot)
+        df = self._collect_currency_snapshot(currency, contracts)
         if df.empty:
             return None, f"{currency}: empty snapshot"
 
-        # Save
         msg = self._save_snapshot(currency, df)
         self._log(msg)
 
-        # Log manifest
-        self._append_manifest(
-            {
-                "currency": currency,
-                "status": "ok",
-                "rows": len(df),
-                "contracts": len(contracts),
-                "iv_count": int(df["impliedVol"].notna().sum()),
-                "delta_count": int(df["delta"].notna().sum()),
-                "spot": spot,
-                "timestamp": datetime.now().isoformat(),
-            }
-        )
+        front_price = futures_months[0]["price"]
+        self._append_manifest({
+            "currency": currency,
+            "status": "ok",
+            "rows": len(df),
+            "contracts": len(contracts),
+            "iv_count": int(df["impliedVol"].notna().sum()),
+            "delta_count": int(df["delta"].notna().sum()),
+            "spot": front_price,
+            "timestamp": datetime.now().isoformat(),
+        })
 
         return df, msg
 
@@ -609,7 +620,7 @@ class FXOptionCollector:
         Returns (combined_surface_df, results_df).
         """
         print("=" * 60)
-        print("FX OPTION SURFACE COLLECTION")
+        print("FX OPTION SURFACE COLLECTION (CME Futures Options)")
         print("=" * 60)
         start_time = time.time()
 
@@ -620,7 +631,9 @@ class FXOptionCollector:
         for ccy in self.currencies:
             state, last_ts = self._check_cache(ccy)
             cache_states[ccy] = (state, last_ts)
-            ts_str = last_ts.strftime("%Y-%m-%d %H:%M") if last_ts else "never"
+            ts_str = (
+                last_ts.strftime("%Y-%m-%d %H:%M") if last_ts else "never"
+            )
             self._log(f"{ccy}: {state} (last: {ts_str})")
 
         to_collect = [
@@ -628,34 +641,28 @@ class FXOptionCollector:
             for ccy in self.currencies
             if not (skip_current and cache_states[ccy][0] == "current")
         ]
-        skipped = [ccy for ccy in self.currencies if ccy not in to_collect]
+        skipped = [
+            ccy for ccy in self.currencies if ccy not in to_collect
+        ]
 
         self._log_summary("")
         self._log_summary(
-            f"  CURRENT (skip): {len(skipped)} [{', '.join(skipped) or 'none'}]"
+            f"  CURRENT (skip): {len(skipped)} "
+            f"[{', '.join(skipped) or 'none'}]"
         )
         self._log_summary(
-            f"  TO COLLECT:     {len(to_collect)} [{', '.join(to_collect) or 'none'}]"
+            f"  TO COLLECT:     {len(to_collect)} "
+            f"[{', '.join(to_collect) or 'none'}]"
         )
 
         if not to_collect:
             self._log_summary("")
-            self._log_summary("Nothing to collect — all currencies current.")
+            self._log_summary(
+                "Nothing to collect — all currencies current."
+            )
             return self.build_surface_matrix(), pd.DataFrame()
 
-        # Phase 2: Get spot prices
-        self._log_summary("")
-        self._log_summary("Phase 2: Getting spot prices...")
-        spots = self._get_spot_prices()
-
-        # Phase 3: Get option chains
-        self._log_summary("")
-        self._log_summary("Phase 3: Discovering option chains...")
-        chains = self._get_option_chains(spots)
-
-        # Phase 4: Collect snapshots
-        self._log_summary("")
-        self._log_summary("Phase 4: Collecting option surfaces...")
+        # Phase 2-4: Collect each currency
         results = []
         all_dfs = []
 
@@ -663,78 +670,72 @@ class FXOptionCollector:
             self._log_summary("")
             self._log(f"--- {ccy} ({i + 1}/{len(to_collect)}) ---")
 
-            if ccy not in spots:
-                self._log(f"{ccy}: SKIP (no spot price)")
-                results.append(
-                    {"currency": ccy, "status": "no_spot", "rows": 0}
-                )
-                continue
-
-            if ccy not in chains:
-                self._log(f"{ccy}: SKIP (no option chain)")
-                results.append(
-                    {"currency": ccy, "status": "no_chain", "rows": 0}
-                )
-                continue
-
-            spot = spots[ccy]
-            chain = chains[ccy]
-
-            # Build contracts
-            contracts = self._build_option_contracts(ccy, chain)
-            if not contracts:
-                self._log(f"{ccy}: SKIP (no contracts qualified)")
-                results.append(
-                    {"currency": ccy, "status": "no_contracts", "rows": 0}
-                )
-                continue
-
-            # Collect snapshot
             try:
-                df = self._collect_currency_snapshot(ccy, contracts, spot)
-
-                if df.empty:
-                    results.append(
-                        {"currency": ccy, "status": "empty", "rows": 0}
-                    )
+                # Phase 2: Futures months + prices
+                futures_months = self._get_futures_months(ccy)
+                if not futures_months:
+                    results.append({
+                        "currency": ccy, "status": "no_futures", "rows": 0,
+                    })
                     continue
 
-                # Save
+                # Phase 3: Option chains
+                chains = self._get_option_chains(ccy, futures_months)
+                if not chains:
+                    results.append({
+                        "currency": ccy, "status": "no_chain", "rows": 0,
+                    })
+                    continue
+
+                # Build contracts
+                contracts = self._build_option_contracts(ccy, chains)
+                if not contracts:
+                    results.append({
+                        "currency": ccy, "status": "no_contracts",
+                        "rows": 0,
+                    })
+                    continue
+
+                # Phase 4: Collect snapshot
+                df = self._collect_currency_snapshot(ccy, contracts)
+
+                if df.empty:
+                    results.append({
+                        "currency": ccy, "status": "empty", "rows": 0,
+                    })
+                    continue
+
                 msg = self._save_snapshot(ccy, df)
                 self._log(msg)
                 all_dfs.append(df)
 
-                results.append(
-                    {
-                        "currency": ccy,
-                        "status": "ok",
-                        "rows": len(df),
-                        "contracts": len(contracts),
-                        "iv_count": int(df["impliedVol"].notna().sum()),
-                        "delta_count": int(df["delta"].notna().sum()),
-                        "spot": spot,
-                    }
-                )
+                front_price = futures_months[0]["price"]
+                results.append({
+                    "currency": ccy,
+                    "status": "ok",
+                    "rows": len(df),
+                    "contracts": len(contracts),
+                    "iv_count": int(df["impliedVol"].notna().sum()),
+                    "delta_count": int(df["delta"].notna().sum()),
+                    "spot": front_price,
+                })
 
-                # Log manifest
-                self._append_manifest(
-                    {
-                        "currency": ccy,
-                        "status": "ok",
-                        "rows": len(df),
-                        "contracts": len(contracts),
-                        "iv_count": int(df["impliedVol"].notna().sum()),
-                        "delta_count": int(df["delta"].notna().sum()),
-                        "spot": spot,
-                        "timestamp": datetime.now().isoformat(),
-                    }
-                )
+                self._append_manifest({
+                    "currency": ccy,
+                    "status": "ok",
+                    "rows": len(df),
+                    "contracts": len(contracts),
+                    "iv_count": int(df["impliedVol"].notna().sum()),
+                    "delta_count": int(df["delta"].notna().sum()),
+                    "spot": front_price,
+                    "timestamp": datetime.now().isoformat(),
+                })
 
             except Exception as e:
                 self._log(f"{ccy}: ERROR - {e}")
-                results.append(
-                    {"currency": ccy, "status": f"error: {e}", "rows": 0}
-                )
+                results.append({
+                    "currency": ccy, "status": f"error: {e}", "rows": 0,
+                })
 
             if progress_callback:
                 progress_callback(i + 1, len(to_collect), ccy)
@@ -751,15 +752,22 @@ class FXOptionCollector:
         self._log_summary(f"  Currencies collected: {len(all_dfs)}")
         self._log_summary(f"  Skipped (current): {len(skipped)}")
         total_rows = sum(len(df) for df in all_dfs)
-        total_iv = sum(df["impliedVol"].notna().sum() for df in all_dfs) if all_dfs else 0
-        total_delta = sum(df["delta"].notna().sum() for df in all_dfs) if all_dfs else 0
+        total_iv = (
+            sum(df["impliedVol"].notna().sum() for df in all_dfs)
+            if all_dfs else 0
+        )
+        total_delta = (
+            sum(df["delta"].notna().sum() for df in all_dfs)
+            if all_dfs else 0
+        )
         self._log_summary(f"  Total rows: {total_rows}")
         self._log_summary(f"  Rows with IV: {total_iv}")
         self._log_summary(f"  Rows with delta: {total_delta}")
 
-        # Combine all new snapshots
-        combined = pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
-
+        combined = (
+            pd.concat(all_dfs, ignore_index=True)
+            if all_dfs else pd.DataFrame()
+        )
         return combined, results_df
 
     # ------------------------------------------------------------------
@@ -767,10 +775,7 @@ class FXOptionCollector:
     # ------------------------------------------------------------------
 
     def build_surface_matrix(self) -> pd.DataFrame:
-        """Load all cached per-currency parquets and combine.
-
-        Returns a single DataFrame with all currencies and snapshots.
-        """
+        """Load all cached per-currency parquets and combine."""
         dfs = []
         for path in sorted(self.cache_dir.glob("*.parquet")):
             if path.stem == "manifest":

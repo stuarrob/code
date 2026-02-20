@@ -1,9 +1,10 @@
 """
 Step 8: FX Option Surface Collection
 
-Snapshot collector for PHLX FX option prices and Greeks.
+Snapshot collector for CME FX futures option prices and Greeks.
 Captures the full volatility surface (all strikes x expirations x put/call)
-for EUR, GBP, AUD, CAD, CHF, JPY vs USD.
+for EUR, GBP, AUD, CAD, CHF, JPY vs USD via options on CME currency
+futures (6E, 6B, 6A, 6C, 6S, 6J) traded on GLOBEX.
 
 Usage (from notebook):
     from scripts.s8_fx_options import collect_fx_options

@@ -184,7 +184,7 @@ def calibrate_sabr(
     bounds = [
         (1e-4, 2.0),      # alpha
         (-0.999, 0.999),   # rho
-        (1e-4, 5.0),       # nu
+        (1e-4, 20.0),      # nu
     ]
 
     def objective(params):
