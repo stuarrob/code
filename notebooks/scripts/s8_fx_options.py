@@ -1,14 +1,14 @@
 """
 Step 8: FX Option Surface Collection
 
-Snapshot collector for CME FX futures option prices and Greeks.
-Captures the full volatility surface (all strikes x expirations x put/call)
-for EUR, GBP, AUD, CAD, CHF, JPY vs USD via options on CME currency
-futures (6E, 6B, 6A, 6C, 6S, 6J) traded on GLOBEX.
+Two modes:
+  1. Live snapshot via IB Gateway (daily collection, ~15 min)
+  2. Historical backfill via Databento (3 years, ~30 min)
 
 Usage (from notebook):
-    from scripts.s8_fx_options import collect_fx_options
-    surface = collect_fx_options(FX_CACHE_DIR, PROCESSED_DIR)
+    from scripts.s8_fx_options import collect_fx_options, collect_fx_options_historical
+    surface = collect_fx_options(FX_CACHE_DIR, PROCESSED_DIR)          # IB live
+    surface = collect_fx_options_historical(FX_DB_DIR, start, end)     # Databento
 """
 
 import sys
@@ -95,5 +95,59 @@ def collect_fx_options(
         print(f"\nIB connection failed: {e}")
         if surface is not None:
             print(f"Using existing cached surface ({len(surface)} rows).")
+
+    return surface
+
+
+def collect_fx_options_historical(
+    fx_db_dir: Path,
+    start: str = "2023-02-20",
+    end: str = "2026-02-20",
+    currencies: list = None,
+    use_cache: bool = True,
+) -> pd.DataFrame:
+    """Collect historical FX option surface data via Databento.
+
+    Fetches CME FX futures option settlement prices, computes implied
+    vols via Black-76, and returns a DataFrame compatible with the
+    SABR calibration pipeline.
+
+    Args:
+        fx_db_dir: Cache directory for Databento FX data.
+        start: Start date (YYYY-MM-DD).
+        end: End date (YYYY-MM-DD).
+        currencies: List of currency codes, or None for all 6 majors.
+        use_cache: If True, load from cache if available.
+
+    Returns:
+        DataFrame with historical FX option surface data.
+    """
+    from data_collection.databento_fx_collector import DatabentoFXCollector
+
+    # Check cache first
+    if use_cache:
+        dfs = []
+        all_currencies = currencies or ["EUR", "GBP", "AUD", "CAD", "JPY"]
+        for ccy in all_currencies:
+            path = Path(fx_db_dir) / f"{ccy}_surface.parquet"
+            if path.exists():
+                df = pd.read_parquet(path)
+                dfs.append(df)
+                print(f"  {ccy}: loaded {len(df)} rows from cache")
+
+        if dfs:
+            surface = pd.concat(dfs, ignore_index=True)
+            print(f"\nLoaded historical surface: {len(surface)} rows, "
+                  f"{surface['currency'].nunique()} currencies")
+            return surface
+
+    # Fetch from Databento
+    collector = DatabentoFXCollector(cache_dir=str(fx_db_dir))
+    surface = collector.fetch_history(
+        currencies=currencies,
+        start=start,
+        end=end,
+        use_cache=use_cache,
+    )
 
     return surface

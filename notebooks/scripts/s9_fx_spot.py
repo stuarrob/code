@@ -29,6 +29,7 @@ def collect_fx_spot(
     currencies: list = None,
     duration: str = "1 Y",
     run_collection: bool = True,
+    years: int = 1,
 ) -> pd.DataFrame:
     """Collect/update FX spot history.
 
@@ -79,7 +80,10 @@ def collect_fx_spot(
             currencies=currencies,
         )
 
-        combined_df, results = collector.collect_all()
+        if years > 1:
+            combined_df, results = collector.collect_all_extended(years=years)
+        else:
+            combined_df, results = collector.collect_all()
         new_matrix = collector.build_spot_matrix()
         ib.disconnect()
 

@@ -170,6 +170,128 @@ class FXSpotCollector:
         matrix = matrix.sort_index()
         return matrix
 
+    def collect_pair_extended(
+        self,
+        currency: str,
+        years: int = 3,
+    ) -> Tuple[Optional[pd.DataFrame], str]:
+        """Collect extended daily spot history via sequential 1-year IB requests.
+
+        IB limits Forex reqHistoricalData to 1 year per request. This method
+        makes sequential requests stepping back in time to collect multi-year
+        history.
+
+        Args:
+            currency: Currency code (e.g., "EUR").
+            years: Number of years of history to collect.
+
+        Returns:
+            (DataFrame, status message)
+        """
+        pair = FX_PAIRS.get(currency)
+        if not pair:
+            return None, f"{currency}: unknown pair"
+
+        contract = Forex(pair, exchange="IDEALPRO")
+        try:
+            qualified = self.ib.qualifyContracts(contract)
+            if not qualified:
+                return None, f"{pair}: failed to qualify"
+        except Exception as e:
+            return None, f"{pair}: qualify error — {e}"
+
+        all_bars = []
+        end_dt = ""  # Empty string = now
+
+        for i in range(years):
+            try:
+                bars = self.ib.reqHistoricalData(
+                    contract,
+                    endDateTime=end_dt,
+                    durationStr="1 Y",
+                    barSizeSetting="1 day",
+                    whatToShow="MIDPOINT",
+                    useRTH=True,
+                    formatDate=1,
+                )
+            except Exception as e:
+                print(f"  {pair}: request {i + 1}/{years} failed — {e}")
+                break
+
+            if not bars:
+                print(f"  {pair}: request {i + 1}/{years} returned no bars")
+                break
+
+            all_bars.extend(bars)
+            # Set end date to 1 day before the earliest bar in this batch
+            earliest = min(b.date for b in bars)
+            end_dt = earliest.strftime("%Y%m%d-00:00:00") if hasattr(earliest, 'strftime') else str(earliest)
+            print(f"  {pair}: request {i + 1}/{years} — {len(bars)} bars back to {earliest}")
+            time.sleep(2)  # Pause between requests to avoid pacing violations
+
+        if not all_bars:
+            return None, f"{pair}: no bars from {years} requests"
+
+        df = pd.DataFrame([{
+            "date": b.date,
+            "open": b.open,
+            "high": b.high,
+            "low": b.low,
+            "close": b.close,
+            "volume": getattr(b, "volume", 0),
+        } for b in all_bars])
+
+        df["date"] = pd.to_datetime(df["date"])
+        df["currency"] = currency
+        df["pair"] = pair
+
+        # Save (merge with existing cache)
+        path = self.cache_dir / f"{pair}.parquet"
+        df = self._merge_and_save(df, path)
+
+        return df, (
+            f"{pair}: {len(df)} bars "
+            f"({df['date'].min().strftime('%Y-%m-%d')} to "
+            f"{df['date'].max().strftime('%Y-%m-%d')})"
+        )
+
+    def collect_all_extended(
+        self, years: int = 3
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Collect extended spot history for all configured currency pairs.
+
+        Returns:
+            (combined DataFrame, results summary DataFrame)
+        """
+        print(f"\n{'='*60}")
+        print(f"FX Spot Extended Collection — {len(self.currencies)} pairs, {years} years")
+        print(f"{'='*60}\n")
+
+        all_dfs = []
+        results = []
+
+        for ccy in self.currencies:
+            df, msg = self.collect_pair_extended(ccy, years=years)
+            print(f"  {msg}")
+            results.append({
+                "currency": ccy,
+                "pair": FX_PAIRS.get(ccy, ""),
+                "bars": len(df) if df is not None else 0,
+                "status": "ok" if df is not None else "failed",
+            })
+            if df is not None:
+                all_dfs.append(df)
+            time.sleep(2)
+
+        results_df = pd.DataFrame(results)
+        if all_dfs:
+            combined = pd.concat(all_dfs, ignore_index=True)
+            print(f"\nTotal: {len(combined)} bars across {len(all_dfs)} pairs")
+            return combined, results_df
+
+        print("\nNo data collected")
+        return pd.DataFrame(), results_df
+
     def _merge_and_save(self, new_df: pd.DataFrame, path: Path) -> pd.DataFrame:
         """Merge new data with existing parquet, dedup by date, save."""
         if path.exists():
