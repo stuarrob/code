@@ -47,6 +47,7 @@ PAIR_CONFIGS = {
         "slow_window": 5,
         "quiet_q": 0.50,
         "hold_days": 5,
+        "trade_direction": "bull",
     },
     "EUR": {
         "fast_tenor": "1W",
@@ -58,6 +59,7 @@ PAIR_CONFIGS = {
         "slow_window": 10,
         "quiet_q": 0.50,
         "hold_days": 5,
+        "trade_direction": "bull",
     },
     "JPY": {
         "fast_tenor": "1M",
@@ -68,7 +70,8 @@ PAIR_CONFIGS = {
         "slow_method": "chg",
         "slow_window": 3,
         "quiet_q": 0.50,
-        "hold_days": 7,
+        "hold_days": 10,
+        "trade_direction": "bear",
     },
 }
 
@@ -331,16 +334,26 @@ def evaluate_pair(df, mask_both, currency, config=None):
 # Backtest
 # ---------------------------------------------------------------------------
 
-def run_backtest(df, bull_mask, bear_mask, hold_days=5, cost_per_trade_pct=0.00005):
-    """Simple backtest: go long on bull signal, short on bear, hold for N days."""
-    bt = df[["date", "spot"]].dropna().copy().reset_index(drop=True)
+def run_backtest(
+    df, bull_mask, bear_mask,
+    hold_days=5, spot_sign=1,
+    cost_per_trade_pct=0.00005,
+):
+    """Backtest: position on signal, hold for N days.
+
+    spot_sign: +1 for xxx/USD pairs (long=buy pair),
+               -1 for USD/xxx pairs (bull rho → short pair).
+    """
+    bt = df[["date", "spot"]].dropna().copy()
+    bt = bt.reset_index(drop=True)
     bt["daily_ret"] = bt["spot"].pct_change()
     bt["position"] = 0.0
 
+    pos_col = bt.columns.get_loc("position")
     hold_until = -1
     for i in range(len(bt)):
         if i <= hold_until:
-            bt.iloc[i, bt.columns.get_loc("position")] = bt.iloc[i - 1, bt.columns.get_loc("position")]
+            bt.iloc[i, pos_col] = bt.iloc[i - 1, pos_col]
             continue
         date_i = bt["date"].iloc[i]
         if date_i in df["date"].values:
@@ -348,11 +361,11 @@ def run_backtest(df, bull_mask, bear_mask, hold_days=5, cost_per_trade_pct=0.000
             if len(df_idx) > 0:
                 idx = df_idx[0]
                 if bull_mask.get(idx, False):
-                    bt.iloc[i, bt.columns.get_loc("position")] = 1.0
-                    hold_until = min(i + hold_days, len(bt) - 1)
+                    bt.iloc[i, pos_col] = float(spot_sign)
+                    hold_until = i + hold_days
                 elif bear_mask.get(idx, False):
-                    bt.iloc[i, bt.columns.get_loc("position")] = -1.0
-                    hold_until = min(i + hold_days, len(bt) - 1)
+                    bt.iloc[i, pos_col] = float(-spot_sign)
+                    hold_until = i + hold_days
 
     bt["signal_ret"] = bt["position"].shift(1) * bt["daily_ret"]
     bt["pos_change"] = bt["position"].diff().abs()
