@@ -7,8 +7,13 @@ between the fast tenor moving and the slow tenor catching up.
 
 Key finding: the optimal tenor pair differs by liquidity:
   - EUR (most liquid)  → 1W vs 1M  (fastest propagation)
-  - GBP (liquid)       → 1M vs 3M  (3-day lookback)
+  - GBP (liquid)       → 1M vs 1W  (1M rho leads, 1W quiet filter, bull)
   - JPY (liquid, USD/) → 1M vs 3M  (7-day lookback, bear direction)
+
+Volume enhancement: P/C ratio from option surfaces adds signal quality.
+  - EUR bull: only trade when P/C ratio z < 0 (puts are light → bull has room)
+  - GBP bull: only trade when P/C ratio z < 0.5 (avoid extreme put crowding)
+  - JPY bear: only trade when total volume z < 0.5 (avoid extreme volume spikes)
 """
 
 import warnings
@@ -39,14 +44,14 @@ FORWARD_HORIZONS = [1, 2, 3, 5, 7, 10, 14, 21]
 PAIR_CONFIGS = {
     "GBP": {
         "fast_tenor": "1M",
-        "slow_tenor": "3M",
+        "slow_tenor": "1W",
         "fast_method": "chg",
-        "fast_window": 3,
-        "fast_threshold_q": 0.25,
+        "fast_window": 5,
+        "fast_threshold_q": 0.20,
         "slow_method": "dev",
         "slow_window": 5,
-        "quiet_q": 0.50,
-        "hold_days": 5,
+        "quiet_q": 0.40,
+        "hold_days": 7,
         "trade_direction": "bull",
     },
     "EUR": {
@@ -397,3 +402,103 @@ def run_backtest(
         "max_drawdown": max_dd * 100,
         "bt": bt,
     }
+
+
+# ---------------------------------------------------------------------------
+# Volume features (P/C ratio from option surfaces)
+# ---------------------------------------------------------------------------
+
+# Per-currency volume filter rules
+VOLUME_FILTER_RULES = {
+    "EUR": {"feature": "pc_ratio_z", "op": "lt", "threshold": 0.0},
+    "GBP": {"feature": "pc_ratio_z", "op": "lt", "threshold": 0.5},
+    "JPY": {"feature": "total_vol_z", "op": "lt", "threshold": 0.5},
+}
+
+
+def load_volume_data(currency, data_dir=None):
+    """Load daily call/put volume aggregates from option surface data.
+
+    Returns a DataFrame indexed by date with columns:
+        vol_C, vol_P, total_vol, pc_ratio, pc_ratio_z, total_vol_z
+    """
+    if data_dir is None:
+        data_dir = Path.home() / "trade_data" / "ETFTrader"
+    data_dir = Path(data_dir)
+
+    surface_path = data_dir / "fx_options_db" / f"{currency}_surface.parquet"
+    if not surface_path.exists():
+        return pd.DataFrame()
+
+    df = pd.read_parquet(surface_path)
+    df["date"] = pd.to_datetime(df["timestamp"]).dt.normalize()
+
+    # Aggregate daily volume by call/put
+    daily = df.groupby(["date", "right"])["volume"].sum().unstack(fill_value=0)
+    daily.columns = [f"vol_{c}" for c in daily.columns]
+
+    if "vol_C" not in daily.columns:
+        daily["vol_C"] = 0
+    if "vol_P" not in daily.columns:
+        daily["vol_P"] = 0
+
+    daily["total_vol"] = daily["vol_C"] + daily["vol_P"]
+    daily["pc_ratio"] = daily["vol_P"] / daily["vol_C"]
+    daily["pc_ratio"] = daily["pc_ratio"].replace([np.inf, -np.inf], np.nan)
+
+    # Expanding-window z-scores (no lookahead)
+    for col in ["pc_ratio", "total_vol"]:
+        expanding_mean = daily[col].expanding(min_periods=20).mean()
+        expanding_std = daily[col].expanding(min_periods=20).std()
+        daily[f"{col}_z"] = (daily[col] - expanding_mean) / expanding_std
+
+    return daily
+
+
+def apply_volume_filter(df, signal_mask, currency, volume_df, rule=None):
+    """Apply volume filter to an existing signal mask.
+
+    Args:
+        df: Signal DataFrame (must have 'date' column).
+        signal_mask: Boolean Series aligned with df index.
+        currency: Currency code ('EUR', 'GBP', 'JPY').
+        volume_df: Output of load_volume_data().
+        rule: Override rule dict. Default uses VOLUME_FILTER_RULES[currency].
+
+    Returns:
+        filtered_mask: Boolean Series (subset of signal_mask that passes volume filter).
+        filter_info: Dict with pass/fail counts.
+    """
+    if rule is None:
+        rule = VOLUME_FILTER_RULES.get(currency)
+    if rule is None or volume_df.empty:
+        return signal_mask.copy(), {"n_pass": signal_mask.sum(), "n_fail": 0, "n_no_data": 0}
+
+    feature = rule["feature"]
+    op = rule["op"]
+    threshold = rule["threshold"]
+
+    filtered = pd.Series(False, index=df.index)
+    n_pass = 0
+    n_fail = 0
+    n_no_data = 0
+
+    for idx in df.index[signal_mask]:
+        sig_date = df.loc[idx, "date"]
+        if sig_date not in volume_df.index:
+            n_no_data += 1
+            continue
+        val = volume_df.loc[sig_date].get(feature, np.nan)
+        if pd.isna(val):
+            n_no_data += 1
+            continue
+        if op == "lt" and val < threshold:
+            filtered.iloc[idx] = True
+            n_pass += 1
+        elif op == "gt" and val > threshold:
+            filtered.iloc[idx] = True
+            n_pass += 1
+        else:
+            n_fail += 1
+
+    return filtered, {"n_pass": n_pass, "n_fail": n_fail, "n_no_data": n_no_data}
