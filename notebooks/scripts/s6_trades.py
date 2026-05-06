@@ -400,7 +400,7 @@ def generate_trades(
         for p in ib.positions()
     ]
 
-    # Live prices
+    # Live prices — qualify contracts and exclude dead tickers
     all_tickers = sorted(
         set(p["ticker"] for p in ib_positions)
         | set(target_weights.index)
@@ -408,14 +408,35 @@ def generate_trades(
     ib.reqMarketDataType(3)
     live_prices = {}
     contracts = []
+    qualified_tickers = set()
+    dead_tickers = set()
     for t in all_tickers:
         c = Stock(t, "SMART", "USD")
         try:
             ib.qualifyContracts(c)
             if c.conId:
                 contracts.append(c)
+                qualified_tickers.add(t)
+            else:
+                dead_tickers.add(t)
         except Exception:
-            pass
+            dead_tickers.add(t)
+
+    # Remove dead tickers from targets — they can't be traded
+    if dead_tickers:
+        removed = dead_tickers & set(target_weights.index)
+        if removed:
+            print(
+                f"\nExcluding {len(removed)} untradeable ticker(s) "
+                f"from target: {', '.join(sorted(removed))}"
+            )
+            target_weights = target_weights.drop(
+                list(removed), errors="ignore"
+            )
+            # Renormalise remaining weights to sum to original total
+            wt_sum = target_weights.sum()
+            if wt_sum > 0:
+                target_weights = target_weights / wt_sum * 1.0
     snaps = [
         (c.symbol, ib.reqMktData(c, snapshot=True))
         for c in contracts
@@ -429,6 +450,43 @@ def generate_trades(
                 break
         ib.cancelMktData(td.contract)
     ib.reqMarketDataType(1)
+
+    # Fallback: fill missing prices from cached data (only for qualified tickers)
+    missing = qualified_tickers - set(live_prices.keys())
+    if missing:
+        cache_path = (
+            Path.home() / "trade_data" / "ETFTrader"
+            / "processed" / "etf_prices_db.parquet"
+        )
+        if cache_path.exists():
+            import pyarrow.parquet as pq
+            all_cache_cols = set(
+                pq.read_schema(cache_path).names
+            )
+            to_read = [c for c in missing if c in all_cache_cols]
+            if to_read:
+                cached = pd.read_parquet(
+                    cache_path, columns=to_read
+                )
+                for t in to_read:
+                    last = cached[t].dropna()
+                    if len(last) > 0:
+                        live_prices[t] = float(last.iloc[-1])
+
+        still_missing = qualified_tickers - set(live_prices.keys())
+        ib_count = len(live_prices) - len(missing - still_missing)
+        cache_count = len(missing) - len(still_missing)
+        print(
+            f"Prices: {ib_count} from IB, "
+            f"{cache_count} from cache"
+        )
+        if still_missing:
+            print(
+                f"  WARNING: no price for "
+                f"{sorted(still_missing)}"
+            )
+    else:
+        print(f"Prices: {len(live_prices)} from IB (all live)")
 
     # Compute current invested value (for deploy_cash mode)
     invested_value = sum(
@@ -507,25 +565,6 @@ def generate_trades(
                 "instruction": "APPROVE",
             })
 
-    # Cash available after sells
-    sell_proceeds = sum(
-        t["est_value"] for t in trades
-        if t["action"] == "SELL"
-    )
-    cover_cost = sum(
-        t["est_value"] for t in trades
-        if t["action"] == "BUY_TO_COVER"
-    )
-    if deploy_cash is not None:
-        # Cap at actual cash so we never buy on margin
-        available = max(
-            0, min(deploy_cash, cash) + sell_proceeds - cover_cost
-        )
-    else:
-        available = max(
-            0, cash + sell_proceeds - cover_cost - cash_reserve
-        )
-
     # Buys: new positions + rebalance drifted
     buy_candidates = []
     for ticker, tw in targets.items():
@@ -572,6 +611,38 @@ def generate_trades(
                         "instruction": "APPROVE",
                     })
 
+    # Cash available after ALL sells (exit + rebalance)
+    sell_proceeds = sum(
+        t["est_value"] for t in trades
+        if t["action"] == "SELL"
+    )
+    cover_cost = sum(
+        t["est_value"] for t in trades
+        if t["action"] == "BUY_TO_COVER"
+    )
+    post_sell_cash = cash + sell_proceeds - cover_cost
+
+    if deploy_cash is not None:
+        if post_sell_cash < 0:
+            raise RuntimeError(
+                f"Account cash after sells/covers would be "
+                f"${post_sell_cash:,.0f} (cash=${cash:,.0f} "
+                f"+ sells=${sell_proceeds:,.0f} "
+                f"- covers=${cover_cost:,.0f}). "
+                f"Cannot generate buys while on margin."
+            )
+        available = max(0, min(deploy_cash, post_sell_cash))
+    else:
+        available = max(
+            0, post_sell_cash - cash_reserve
+        )
+
+    print(
+        f"\nCash flow: cash=${cash:,.0f} + sells=${sell_proceeds:,.0f}"
+        f" - covers=${cover_cost:,.0f} = ${post_sell_cash:,.0f}"
+    )
+    print(f"Available for buys: ${available:,.0f}")
+
     # Apply cash reserve cap on buys
     running_spend = 0
     for bc in buy_candidates:
@@ -597,6 +668,45 @@ def generate_trades(
                         )
                     trades.append(bc)
                     running_spend += bc["est_value"]
+
+    # ── POST-PLAN VALIDATION: hard-fail on margin or shorts ──
+    plan_buys = sum(
+        t["est_value"] for t in trades if t["action"] == "BUY"
+    )
+    plan_sells = sum(
+        t["est_value"] for t in trades if t["action"] == "SELL"
+    )
+    plan_covers = sum(
+        t["est_value"] for t in trades
+        if t["action"] == "BUY_TO_COVER"
+    )
+    projected_cash = cash + plan_sells - plan_buys - plan_covers
+
+    if projected_cash < 0:
+        raise RuntimeError(
+            f"Trade plan would result in negative cash "
+            f"(${projected_cash:,.0f}). "
+            f"Cash=${cash:,.0f}, buys=${plan_buys:,.0f}, "
+            f"sells=${plan_sells:,.0f}, covers=${plan_covers:,.0f}. "
+            f"Aborting — no trade plan written."
+        )
+
+    for t in trades:
+        if t["action"] == "SELL":
+            held_pos = ib_map.get(t["ticker"])
+            held_shares = (
+                held_pos["shares"] if held_pos else 0
+            )
+            if t["shares"] > held_shares:
+                raise RuntimeError(
+                    f"SELL {t['shares']} {t['ticker']} exceeds "
+                    f"held {held_shares:.0f} shares — would "
+                    f"create short position. "
+                    f"Aborting — no trade plan written."
+                )
+
+    print(f"\nPlan validated: projected cash=${projected_cash:,.0f} "
+          f"(long-only, no margin)")
 
     trades.sort(
         key=lambda t: (
@@ -648,18 +758,80 @@ def generate_trades(
         t["est_value"] for t in trades if t["action"] == "SELL"
     )
     cash_after = cash + total_sells - total_buys
-    print(f"\nTrade plan: {len(trades)} trades")
-    print(f"  Buys: ${total_buys:,.0f}  |  Sells: ${total_sells:,.0f}")
-    if deploy_cash is not None:
-        print(
-            f"  Cash after: ${cash_after:,.0f} "
-            f"(deployed: ${deploy_cash:,.0f})"
+
+    # ── POSITION COMPARISON TABLE ──
+    print(f"\n{'=' * 78}")
+    print("PORTFOLIO REBALANCE SUMMARY")
+    print(f"{'=' * 78}")
+    print(
+        f"  {'':>6}  {'CURRENT':>12}  {'TARGET':>12}  "
+        f"{'ACTION':>8}  {'SHARES':>7}  {'VALUE':>10}"
+    )
+    print(f"  {'─' * 6}  {'─' * 12}  {'─' * 12}  "
+          f"{'─' * 8}  {'─' * 7}  {'─' * 10}")
+
+    # Build trade lookup
+    trade_map = {}
+    for t in trades:
+        trade_map[t["ticker"]] = t
+
+    # All tickers involved (current + target)
+    all_involved = sorted(
+        set(p["ticker"] for p in pos_data)
+        | set(target_weights.index)
+    )
+    for ticker in all_involved:
+        if ticker == "IBKR":
+            continue
+        # Current state
+        cur = next(
+            (p for p in pos_data if p["ticker"] == ticker),
+            None,
         )
+        cur_val = f"${cur['mkt_value']:>9,.0f}" if cur else "       —"
+        # Target
+        tw = target_weights.get(ticker, 0)
+        tgt_val = (
+            f"  {tw * 100:>5.1f}%"
+            if tw > 0 else "       —"
+        )
+        # Trade
+        tr = trade_map.get(ticker)
+        if tr:
+            act = tr["action"]
+            sh = tr["shares"]
+            val = f"${tr['est_value']:>8,.0f}"
+        else:
+            act = "HOLD"
+            sh = ""
+            val = ""
+
+        print(
+            f"  {ticker:>6}  {cur_val:>12}  {tgt_val:>12}  "
+            f"{act:>8}  {sh:>7}  {val:>10}"
+        )
+
+    print(f"  {'─' * 6}  {'─' * 12}  {'─' * 12}  "
+          f"{'─' * 8}  {'─' * 7}  {'─' * 10}")
+
+    buy_count = sum(
+        1 for t in trades if t["action"] == "BUY"
+    )
+    sell_count = sum(
+        1 for t in trades if "SELL" in t["action"]
+    )
+    print(f"\n  Sells: {sell_count} trades, ${total_sells:,.0f}")
+    print(f"  Buys:  {buy_count} trades, ${total_buys:,.0f}")
+    print(f"  Cash now:   ${cash:>12,.0f}")
+    print(f"  Cash after: ${cash_after:>12,.0f}")
+
+    # Final safety confirmation
+    if cash_after >= 0:
+        print(f"\n  LONG-ONLY, NO MARGIN")
     else:
-        print(
-            f"  Cash after: ${cash_after:,.0f} "
-            f"(reserve: ${cash_reserve:,})"
-        )
+        print(f"\n  *** WARNING: projected cash negative ***")
+
+    print(f"{'=' * 78}")
     print(f"Saved: {trade_plan_file}")
 
     # Print human-readable trade summary

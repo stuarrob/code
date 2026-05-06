@@ -634,6 +634,206 @@ def interpret_trades(trades: list) -> list:
     return result
 
 
+def validate_trade_plan(
+    final_trades: list,
+    ib_host: str = "127.0.0.1",
+    ib_port: int = 4001,
+    ib_client_id: int = 16,
+) -> dict:
+    """Pre-flight validation: hard-fail if plan would cause margin,
+    shorts, or untradeable contracts.
+
+    Connects read-only to IB and checks:
+      1. Every ticker can be qualified as a contract on IB
+      2. No sell would create a short position
+      3. Projected cash stays positive (no margin)
+      4. No existing shorts or margin
+
+    Raises RuntimeError if any check fails. No orders are placed.
+
+    Returns:
+        dict with current/projected positions, cash, and validation details.
+    """
+    from ib_insync import IB, Stock
+
+    ib = IB()
+    ib.connect(
+        ib_host, ib_port,
+        clientId=ib_client_id, readonly=True, timeout=10,
+    )
+    account = ib.managedAccounts()[0]
+
+    summary_vals = {}
+    for av in ib.accountSummary():
+        if av.currency == "USD":
+            try:
+                summary_vals[av.tag] = float(av.value)
+            except (ValueError, TypeError):
+                pass
+
+    nlv = summary_vals.get("NetLiquidation", 0)
+    cash = summary_vals.get("TotalCashValue", 0)
+
+    pos_map = {}
+    for p in ib.positions():
+        sym = p.contract.symbol
+        pos_map[sym] = pos_map.get(sym, 0) + float(p.position)
+
+    # Check contracts: qualify every ticker on IB
+    trade_tickers = sorted(set(
+        t["ticker"] for t in final_trades
+        if t.get("action") != "SKIP"
+    ))
+    qualified = {}
+    unqualified = []
+    for ticker in trade_tickers:
+        c = Stock(ticker, "SMART", "USD")
+        try:
+            ib.qualifyContracts(c)
+            if c.conId:
+                qualified[ticker] = c
+            else:
+                unqualified.append(ticker)
+        except Exception:
+            unqualified.append(ticker)
+
+    ib.disconnect()
+
+    errors = []
+    warnings = []
+
+    # Check 1: all contracts must be tradeable
+    if unqualified:
+        errors.append(
+            f"UNTRADEABLE on IB: {', '.join(unqualified)} "
+            f"— cannot place orders for these tickers"
+        )
+
+    # Check 2: account must not already be on margin
+    if cash < 0:
+        warnings.append(
+            f"ACCOUNT ON MARGIN: cash = ${cash:,.0f}"
+        )
+
+    # Check 3: no existing short positions
+    for ticker, shares in pos_map.items():
+        if shares < 0:
+            errors.append(
+                f"EXISTING SHORT: {ticker} = {shares:.0f} shares "
+                f"— must cover before proceeding"
+            )
+
+    # Check 4: simulate all trades
+    projected_pos = dict(pos_map)
+    projected_cash = cash
+
+    for t in final_trades:
+        if t.get("action") == "SKIP":
+            continue
+        ticker = t["ticker"]
+        shares = t["shares"]
+        ref_price = (
+            t.get("ref_price")
+            or t.get("limit_price")
+            or t.get("price", 0)
+        )
+        est_cost = shares * ref_price if ref_price else 0
+
+        if t["action"] == "SELL":
+            held = projected_pos.get(ticker, 0)
+            if shares > held:
+                errors.append(
+                    f"SELL {shares} {ticker}: exceeds held "
+                    f"{held:.0f} — would create short"
+                )
+            projected_pos[ticker] = held - shares
+            projected_cash += est_cost
+
+        elif t["action"] in ("BUY", "BUY_TO_COVER"):
+            projected_pos[ticker] = (
+                projected_pos.get(ticker, 0) + shares
+            )
+            projected_cash -= est_cost
+
+    # Check 5: projected shorts
+    for ticker, shares in projected_pos.items():
+        if shares < -0.5:
+            errors.append(
+                f"{ticker} would end at {shares:.0f} shares (SHORT)"
+            )
+
+    # Check 6: projected cash
+    if projected_cash < 0:
+        errors.append(
+            f"Projected cash = ${projected_cash:,.0f} (MARGIN)"
+        )
+
+    # Print report
+    passed = len(errors) == 0
+    status = "PASSED" if passed else "FAILED"
+
+    print(f"\n{'=' * 60}")
+    print(f"PRE-FLIGHT VALIDATION: {status}")
+    print(f"{'=' * 60}")
+    print(f"  Account:          {account}")
+    print(f"  NLV:              ${nlv:>12,.0f}")
+    print(f"  Current cash:     ${cash:>12,.0f}")
+    print(f"  Projected cash:   ${projected_cash:>12,.0f}")
+    print(
+        f"  Contracts:        {len(qualified)}/{len(trade_tickers)}"
+        f" qualified on IB"
+    )
+    current_count = sum(
+        1 for v in pos_map.values() if v > 0.5
+    )
+    projected_count = sum(
+        1 for v in projected_pos.values() if v > 0.5
+    )
+    print(f"  Current positions:   {current_count}")
+    print(f"  Projected positions: {projected_count}")
+
+    if unqualified:
+        print(f"\n  UNTRADEABLE TICKERS:")
+        for t in unqualified:
+            print(f"    {t} — not found on IB SMART/USD")
+
+    shorts = {
+        k: v for k, v in projected_pos.items() if v < -0.5
+    }
+    if shorts:
+        print(f"\n  PROJECTED SHORTS:")
+        for k, v in shorts.items():
+            print(f"    {k}: {v:.0f} shares")
+
+    if warnings:
+        for w in warnings:
+            print(f"    [WARN] {w}")
+
+    if errors:
+        print(f"\n  *** {len(errors)} ERROR(S) — EXECUTION BLOCKED ***")
+        for e in errors:
+            print(f"    [FAIL] {e}")
+        print(f"{'=' * 60}")
+        raise RuntimeError(
+            f"Pre-flight validation FAILED with "
+            f"{len(errors)} error(s). No orders placed.\n"
+            + "\n".join(f"  - {e}" for e in errors)
+        )
+
+    print(f"\n  All checks passed — safe to execute.")
+    print(f"{'=' * 60}")
+
+    return {
+        "passed": True,
+        "current_positions": pos_map,
+        "projected_positions": projected_pos,
+        "qualified_contracts": qualified,
+        "cash": cash,
+        "projected_cash": projected_cash,
+        "nlv": nlv,
+    }
+
+
 def execute_trades(
     final_trades: list,
     live_dir: Path,
@@ -912,24 +1112,27 @@ def execute_trades(
                     pos_map.get(ticker, 0) - shares
                 )
 
-        # TRAILING STOP on every BUY fill
-        # For LIMIT GTC orders, the stop is placed when order is accepted
-        # (Submitted/PreSubmitted) — IB will activate it after the fill
+        # TRAILING STOP on every BUY fill — covers FULL position
+        # (existing holding + new shares), since cancelling duplicate
+        # orders earlier would have removed any prior TRAIL stop.
+        # pos_map[ticker] is updated above to include just-filled shares.
         if (t["action"] == "BUY"
                 and status in ("Filled", "Submitted", "PreSubmitted")
                 and (fill and fill > 0 or limit_px)):
             stop_ref = fill if fill and fill > 0 else limit_px
+            full_qty = int(pos_map.get(ticker, shares))
             ts_order = Order()
             ts_order.action = "SELL"
-            ts_order.totalQuantity = shares
+            ts_order.totalQuantity = full_qty
             ts_order.orderType = "TRAIL"
             ts_order.trailingPercent = trailing_stop_pct
             ts_order.tif = "GTC"
             ts_trade = ib.placeOrder(contract, ts_order)
             ib.sleep(1)
             init_stop = stop_ref * (1 - trailing_stop_pct / 100)
-            print(f"    TRAILING STOP {trailing_stop_pct}% "
-                  f"(~${init_stop:.2f}): {ts_trade.orderStatus.status}")
+            print(f"    TRAILING STOP {trailing_stop_pct}% on "
+                  f"{full_qty} shares (~${init_stop:.2f}): "
+                  f"{ts_trade.orderStatus.status}")
             trailing_stops_placed += 1
 
     # Log execution
@@ -1066,7 +1269,13 @@ def check_order_status(
         else:
             # No matching open order — check if position suggests it filled
             held = pos_map.get(ticker, 0)
-            if is_buy and held >= planned_shares:
+            if action == "BUY_TO_COVER" and held >= 0:
+                # Short is covered (position is zero or long)
+                filled.append({
+                    **t, "fill_status": "FILLED (short covered)",
+                    "fill_price": None, "order_id": None,
+                })
+            elif is_buy and held >= planned_shares:
                 filled.append({
                     **t, "fill_status": "FILLED (position confirms)",
                     "fill_price": None, "order_id": None,
@@ -1203,13 +1412,46 @@ def fix_unfilled_orders(
     account = ib.managedAccounts()[0]
     print(f"Connected for trading: {account}\n")
 
-    # ── SAFETY: snapshot positions for short check ──
+    # ── SAFETY: snapshot positions to verify before resubmitting ──
     pos_map = {}
     for p in ib.positions():
         sym = p.contract.symbol
         pos_map[sym] = (
             pos_map.get(sym, 0) + float(p.position)
         )
+
+    # ── SAFETY: filter out trades that are already satisfied ──
+    verified_resubmit = []
+    for t in to_resubmit:
+        ticker = t["ticker"]
+        action = t["action"]
+        shares = t["shares"]
+        held = pos_map.get(ticker, 0)
+
+        if action == "BUY_TO_COVER" and held >= 0:
+            print(f"  {ticker}: SKIP — short already covered "
+                  f"(hold {held:.0f} shares)")
+            continue
+        if action == "BUY" and held >= shares:
+            print(f"  {ticker}: SKIP — already hold {held:.0f} "
+                  f"(planned {shares})")
+            continue
+        if action == "SELL" and held <= 0:
+            print(f"  {ticker}: SKIP — already sold "
+                  f"(hold {held:.0f} shares)")
+            continue
+        verified_resubmit.append(t)
+
+    skipped = len(to_resubmit) - len(verified_resubmit)
+    if skipped:
+        print(f"\nSkipped {skipped} trades already satisfied by "
+              f"current positions.")
+    to_resubmit = verified_resubmit
+
+    if not to_cancel and not to_resubmit:
+        print("\nNothing to fix after position verification.")
+        ib.disconnect()
+        return []
 
     # Phase 1: Cancel stale orders
     cancelled = 0
@@ -1224,8 +1466,25 @@ def fix_unfilled_orders(
             print(" done")
             cancelled += 1
 
-    print(f"\nCancelled {cancelled} orders.\n")
-    ib.sleep(2)  # Let cancellations settle
+    print(f"\nCancelled {cancelled} orders.")
+    if cancelled > 0:
+        ib.sleep(3)
+        # Verify cancels completed — prevent duplicate orders
+        remaining = ib.openTrades()
+        resubmit_tickers = set(t["ticker"] for t in to_resubmit)
+        still_open = set()
+        for ot in remaining:
+            sym = ot.contract.symbol
+            if (sym in resubmit_tickers
+                    and ot.order.orderType != "TRAIL"):
+                still_open.add(sym)
+        if still_open:
+            raise RuntimeError(
+                f"Could not cancel orders for {still_open}. "
+                f"Cannot safely resubmit — would create "
+                f"duplicate orders."
+            )
+    print()
 
     # Phase 2: Resubmit unfilled trades with fresh prices
     exec_results = []
@@ -1271,6 +1530,29 @@ def fix_unfilled_orders(
         is_buy = action in ("BUY", "BUY_TO_COVER")
         ib_action = "BUY" if is_buy else "SELL"
         shares = t["shares"]
+
+        # ── SAFETY: cancel any stale non-TRAIL order for this
+        #    ticker before resubmitting ──────────
+        current_open = ib.openTrades()
+        for ot in current_open:
+            if (ot.contract.symbol == ticker
+                    and ot.order.orderType != "TRAIL"
+                    and ot.order.action == ib_action):
+                print(f"  {ticker}: Cancelling stale "
+                      f"{ot.order.action} order "
+                      f"#{ot.order.orderId} before resubmit")
+                ib.cancelOrder(ot.order)
+                ib.sleep(1)
+
+        # ── SAFETY: adjust for partial fills ──────────
+        if is_buy and action == "BUY":
+            held = pos_map.get(ticker, 0)
+            if held > 0 and held < shares:
+                remaining = int(shares - held)
+                print(f"  {ticker}: PARTIAL — already hold "
+                      f"{held:.0f}, reducing buy from "
+                      f"{shares} to {remaining}")
+                shares = remaining
 
         # ── SAFETY: prevent short selling ──────────
         if not is_buy:
