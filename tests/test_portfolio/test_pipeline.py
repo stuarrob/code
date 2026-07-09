@@ -8,6 +8,7 @@ so the applet cannot silently drift.
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
@@ -15,11 +16,14 @@ import pytest
 
 from src.portfolio.pipeline import (
     PriceLoad,
+    RefreshResult,
     ScoringResult,
+    cache_status,
     collect_prices,
     optimize_portfolio,
     portfolio_hhi,
     portfolio_volatility,
+    refresh_prices_from_ib,
     score_factors,
 )
 from src.portfolio.policy import load_policy
@@ -195,3 +199,134 @@ def test_portfolio_volatility_nan_when_ticker_missing(policy, synthetic_prices):
     prices_short = synthetic_prices.rename(columns={weights.index[0]: "ZZZ_MISSING"})
     vol = portfolio_volatility(weights, prices_short)
     assert vol != vol  # NaN
+
+
+# ────────────────────────────────────────────────────────────────
+# cache_status
+# ────────────────────────────────────────────────────────────────
+
+def _write_ticker_cache(cache_dir: Path, ticker: str, last_date: pd.Timestamp) -> None:
+    """Create a per-ticker parquet whose latest bar is ``last_date``."""
+    dates = pd.bdate_range(end=last_date, periods=30)
+    df = pd.DataFrame({"close": np.linspace(100, 110, 30)}, index=dates)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(cache_dir / f"{ticker}.parquet")
+
+
+@pytest.mark.unit
+def test_cache_status_classifies_current_stale_missing(tmp_path):
+    """cache_status buckets tickers correctly against a stale_days=1 rule."""
+    today = pd.Timestamp.now().normalize()
+    _write_ticker_cache(tmp_path, "SPY", today)           # current
+    _write_ticker_cache(tmp_path, "QQQ", today - pd.Timedelta(days=10))  # stale
+    # ZZZ_MISS deliberately not written -> missing
+
+    with patch("src.data_collection.comprehensive_etf_list.load_full_universe") as loader:
+        loader.return_value = (["SPY", "QQQ", "ZZZ_MISS"], {})
+        status = cache_status(cache_dir=tmp_path)
+
+    assert status["n_universe"] == 3
+    assert status["n_current"] == 1
+    assert status["n_stale"] == 1
+    assert status["n_missing"] == 1
+    assert status["latest_bar"].normalize() == today
+
+
+@pytest.mark.unit
+def test_cache_status_empty_dir_all_missing(tmp_path):
+    with patch("src.data_collection.comprehensive_etf_list.load_full_universe") as loader:
+        loader.return_value = (["AAA", "BBB", "CCC"], {})
+        status = cache_status(cache_dir=tmp_path)
+    assert status["n_missing"] == 3
+    assert status["n_current"] == 0
+    assert status["latest_bar"] is None
+
+
+# ────────────────────────────────────────────────────────────────
+# refresh_prices_from_ib
+# ────────────────────────────────────────────────────────────────
+
+@pytest.mark.unit
+def test_refresh_prices_from_ib_writes_matrix_and_disconnects(tmp_path):
+    """The refresh wraps IBDataCollector: connects read-only, runs the
+    collector, writes the combined matrix, and always disconnects."""
+    fake_prices = pd.DataFrame(
+        {"SPY": [400.0, 401.0, 402.0], "QQQ": [350.0, 351.0, 352.0]},
+        index=pd.bdate_range("2026-06-01", periods=3),
+    )
+    fake_ib = MagicMock()
+    fake_collector = MagicMock()
+    fake_collector.collect_universe.return_value = (fake_prices, pd.DataFrame())
+
+    processed_dir = tmp_path / "processed"
+    cache_dir = tmp_path / "ib_historical"
+
+    with patch("src.portfolio.ib_state.connect_read_only", return_value=fake_ib) as connect, \
+         patch("src.data_collection.ib_data_collector.IBDataCollector",
+               return_value=fake_collector), \
+         patch("src.data_collection.comprehensive_etf_list.load_full_universe",
+               return_value=(["SPY", "QQQ"], {})):
+        result = refresh_prices_from_ib(
+            ib_host="127.0.0.1", ib_port=4001, ib_client_id=31,
+            cache_dir=cache_dir, processed_dir=processed_dir,
+        )
+
+    connect.assert_called_once()
+    fake_collector.collect_universe.assert_called_once()
+    fake_ib.disconnect.assert_called_once()
+    assert isinstance(result, RefreshResult)
+    assert result.parquet_path == processed_dir / "etf_prices_ib.parquet"
+    assert result.parquet_path.exists()
+    saved = pd.read_parquet(result.parquet_path)
+    assert list(saved.columns) == ["SPY", "QQQ"]
+
+
+@pytest.mark.unit
+def test_refresh_prices_from_ib_disconnects_on_collector_failure(tmp_path):
+    """Even if collect_universe raises, we must not leak the IB connection."""
+    fake_ib = MagicMock()
+    fake_collector = MagicMock()
+    fake_collector.collect_universe.side_effect = RuntimeError("IB pacing violation")
+
+    with patch("src.portfolio.ib_state.connect_read_only", return_value=fake_ib), \
+         patch("src.data_collection.ib_data_collector.IBDataCollector",
+               return_value=fake_collector), \
+         patch("src.data_collection.comprehensive_etf_list.load_full_universe",
+               return_value=(["SPY"], {})):
+        with pytest.raises(RuntimeError, match="pacing violation"):
+            refresh_prices_from_ib(processed_dir=tmp_path)
+
+    fake_ib.disconnect.assert_called_once()
+
+
+@pytest.mark.unit
+def test_refresh_prices_from_ib_forwards_progress_callback(tmp_path):
+    """The applet passes a progress callback expecting (i, total, ticker) —
+    the collector calls back with (i, total, ticker, ok); the adapter must
+    strip the ok flag."""
+    fake_ib = MagicMock()
+    fake_collector = MagicMock()
+    fake_collector.collect_universe.return_value = (pd.DataFrame(), pd.DataFrame())
+
+    seen = []
+
+    def _cb(i, total, ticker):
+        seen.append((i, total, ticker))
+
+    def _fake_collect(tickers, progress_callback=None, **kwargs):
+        # Simulate the collector calling its 4-arg callback
+        if progress_callback:
+            progress_callback(1, 2, "SPY", True)
+            progress_callback(2, 2, "QQQ", False)
+        return pd.DataFrame(), pd.DataFrame()
+
+    fake_collector.collect_universe.side_effect = _fake_collect
+
+    with patch("src.portfolio.ib_state.connect_read_only", return_value=fake_ib), \
+         patch("src.data_collection.ib_data_collector.IBDataCollector",
+               return_value=fake_collector), \
+         patch("src.data_collection.comprehensive_etf_list.load_full_universe",
+               return_value=(["SPY", "QQQ"], {})):
+        refresh_prices_from_ib(processed_dir=tmp_path, progress_callback=_cb)
+
+    assert seen == [(1, 2, "SPY"), (2, 2, "QQQ")]

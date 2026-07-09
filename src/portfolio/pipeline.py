@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import pandas as pd
@@ -40,6 +40,31 @@ from src.portfolio.optimizer import (
 from src.portfolio.policy import SmartBetaPolicy
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_IB_CACHE_DIR = Path.home() / "trade_data" / "ETFTrader" / "ib_historical"
+DEFAULT_PROCESSED_DIR = Path.home() / "trade_data" / "ETFTrader" / "processed"
+REFRESH_IB_CLIENT_ID = 31  # Distinct from ib_state's read-only client (30).
+
+ProgressCallback = Callable[[int, int, str], None]
+
+
+@dataclass(frozen=True)
+class RefreshResult:
+    """Outcome of :func:`refresh_prices_from_ib`.
+
+    Attributes:
+        n_current: Tickers already up-to-date (no IB request made).
+        n_stale: Tickers that were incrementally updated.
+        n_missing: Tickers that were freshly downloaded.
+        n_universe: Total tickers in the ETF universe.
+        parquet_path: Path where the combined price matrix was saved.
+    """
+
+    n_current: int
+    n_stale: int
+    n_missing: int
+    n_universe: int
+    parquet_path: Path
 
 _MIN_HISTORY_DAYS = 252
 _MAX_MISSING_PCT = 10.0
@@ -147,6 +172,150 @@ def collect_prices(
         start_date=prices.index.min(),
         end_date=prices.index.max(),
         n_tickers=prices.shape[1],
+    )
+
+
+def cache_status(
+    cache_dir: Path = DEFAULT_IB_CACHE_DIR,
+    stale_days: int = 1,
+) -> dict[str, object]:
+    """Classify the per-ticker parquet cache without touching IB.
+
+    Returns counts for ``current`` / ``stale`` / ``missing`` against the
+    full ETF universe, plus ``latest_bar`` (max last-date across all
+    per-ticker parquets) and ``n_universe``. Cheap enough to call on
+    every applet rerun.
+
+    A ticker is:
+      - ``current`` if its cache exists and the latest bar is within
+        ``stale_days`` of today,
+      - ``stale`` if its cache exists but the gap exceeds ``stale_days``,
+      - ``missing`` if there is no readable parquet (absent, empty, or
+        unreadable).
+    """
+    from src.data_collection.comprehensive_etf_list import load_full_universe
+
+    tickers, _ = load_full_universe()
+    cache_dir = Path(cache_dir)
+    today = pd.Timestamp.now().normalize()
+
+    current = stale = missing = 0
+    latest_bar: Optional[pd.Timestamp] = None
+    for t in tickers:
+        cache_file = cache_dir / f"{t}.parquet"
+        if not cache_file.exists():
+            missing += 1
+            continue
+        try:
+            df = pd.read_parquet(cache_file)
+            if df.empty:
+                missing += 1
+                continue
+            last_date = pd.Timestamp(df.index.max())
+            gap_days = (today - last_date).days
+            if gap_days <= stale_days:
+                current += 1
+            else:
+                stale += 1
+            if latest_bar is None or last_date > latest_bar:
+                latest_bar = last_date
+        except Exception:  # noqa: BLE001 — unreadable parquet ≈ missing
+            missing += 1
+
+    return {
+        "n_current": current,
+        "n_stale": stale,
+        "n_missing": missing,
+        "n_universe": len(tickers),
+        "latest_bar": latest_bar,
+    }
+
+
+def refresh_prices_from_ib(
+    ib_host: str = "127.0.0.1",
+    ib_port: int = 4001,
+    ib_client_id: int = REFRESH_IB_CLIENT_ID,
+    cache_dir: Path = DEFAULT_IB_CACHE_DIR,
+    processed_dir: Path = DEFAULT_PROCESSED_DIR,
+    duration: str = "5 Y",
+    rate_limit_interval: float = 12.0,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> RefreshResult:
+    """Refresh the per-ticker parquet cache via IB Gateway, then rebuild
+    the combined price matrix.
+
+    Uses ``IBDataCollector``'s smart classification — CURRENT tickers
+    (gap <= stale_days) are skipped entirely, STALE tickers get an
+    incremental update, MISSING tickers get a full ``duration``
+    download. So a run against an already-up-to-date cache costs
+    seconds; a run against a stale cache costs minutes; the first-time
+    full download costs hours (rate-limit-bound).
+
+    Args:
+        ib_host / ib_port / ib_client_id: Gateway connection details.
+            ``ib_client_id`` defaults to :data:`REFRESH_IB_CLIENT_ID`
+            so it will not collide with the read-only snapshot connection.
+        cache_dir: Where per-ticker parquets live.
+        processed_dir: Where the combined ``etf_prices_ib.parquet`` is written.
+        duration / rate_limit_interval: Passed to ``IBDataCollector``.
+        progress_callback: Optional ``(i, total, ticker) -> None`` — the
+            applet uses this to drive a Streamlit progress bar.
+
+    Returns:
+        :class:`RefreshResult` summarising the run and giving the path
+        to the rebuilt price matrix (which :func:`collect_prices` will
+        then re-read).
+
+    Raises:
+        RuntimeError: If IB Gateway cannot be connected (bubbles up
+            from :func:`src.portfolio.ib_state.connect_read_only`).
+    """
+    from src.data_collection.comprehensive_etf_list import load_full_universe
+    from src.data_collection.ib_data_collector import IBDataCollector
+    from src.portfolio.ib_state import connect_read_only
+
+    cache_dir = Path(cache_dir)
+    processed_dir = Path(processed_dir)
+    processed_dir.mkdir(parents=True, exist_ok=True)
+
+    tickers, _ = load_full_universe()
+    logger.info("Refreshing %d tickers via IB (client_id=%d)", len(tickers), ib_client_id)
+
+    ib = connect_read_only(host=ib_host, port=ib_port, client_id=ib_client_id)
+    try:
+        collector = IBDataCollector(
+            ib=ib,
+            cache_dir=str(cache_dir),
+            rate_limit_interval=rate_limit_interval,
+            duration=duration,
+        )
+
+        pre_status = cache_status(cache_dir=cache_dir)
+
+        # Adapter — collector's callback signature is (i, total, ticker, ok);
+        # the applet only cares about (i, total, ticker).
+        def _adapter(i: int, total: int, ticker: str, ok: bool) -> None:  # noqa: FBT001
+            if progress_callback is not None:
+                progress_callback(i, total, ticker)
+
+        prices, _ = collector.collect_universe(tickers, progress_callback=_adapter)
+    finally:
+        try:
+            ib.disconnect()
+        except Exception:  # noqa: BLE001
+            logger.warning("ib.disconnect() raised — ignored during refresh cleanup")
+
+    out_path = processed_dir / "etf_prices_ib.parquet"
+    if prices is not None and not prices.empty:
+        prices.to_parquet(out_path)
+        logger.info("Saved refreshed price matrix: %s (%s)", out_path, prices.shape)
+
+    return RefreshResult(
+        n_current=pre_status["n_current"],
+        n_stale=pre_status["n_stale"],
+        n_missing=pre_status["n_missing"],
+        n_universe=pre_status["n_universe"],
+        parquet_path=out_path,
     )
 
 

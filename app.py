@@ -17,9 +17,10 @@ Architecture (per ADR-0001 and CLAUDE.md):
 
 from __future__ import annotations
 
-import streamlit as st
-
 from pathlib import Path
+
+import pandas as pd
+import streamlit as st
 
 from src.portfolio.ib_state import (
     DEFAULT_IB_CLIENT_ID,
@@ -32,10 +33,13 @@ from src.portfolio.ib_state import (
     load_nav_history,
 )
 from src.portfolio.pipeline import (
+    DEFAULT_IB_CACHE_DIR,
+    cache_status,
     collect_prices,
     optimize_portfolio,
     portfolio_hhi,
     portfolio_volatility,
+    refresh_prices_from_ib,
     score_factors,
 )
 from src.portfolio.policy import DEFAULT_POLICY_PATH, load_policy
@@ -293,13 +297,85 @@ with tab_collect:
         f"Loads the ETF price matrix from "
         f"`{DEFAULT_PROCESSED_DIR}` and applies the quality filter "
         f"(min {policy.factor_lookbacks.momentum} days of history, "
-        f"less than 10% missing bars). Priority order: Databento → IB → yfinance."
+        f"less than 10% missing bars). Priority order: Databento → IB → yfinance. "
+        f"The daily cron keeps this current — refresh from IB Gateway "
+        f"on-demand if you need fresh data right now."
     )
-    processed_dir = st.text_input(
-        "Processed data directory", value=str(DEFAULT_PROCESSED_DIR),
-        help="Directory containing etf_prices_{db,ib,filtered}.parquet",
-    )
+
+    # ── Cache status ────────────────────────────────────────
+    with st.spinner("Scanning per-ticker cache…"):
+        try:
+            status = cache_status(cache_dir=DEFAULT_IB_CACHE_DIR)
+        except Exception as exc:  # noqa: BLE001
+            status = None
+            st.warning(f"Cache scan failed: {exc}")
+    if status is not None:
+        cs1, cs2, cs3, cs4 = st.columns(4)
+        cs1.metric("Universe", status["n_universe"])
+        cs2.metric("Current", status["n_current"])
+        cs3.metric("Stale", status["n_stale"])
+        cs4.metric("Missing", status["n_missing"])
+        if status["latest_bar"] is not None:
+            st.caption(
+                f"Latest cached bar across all tickers: "
+                f"**{status['latest_bar']:%Y-%m-%d}** · "
+                f"per-ticker files under `{DEFAULT_IB_CACHE_DIR}`"
+            )
+
+    # ── Config + actions ─────────────────────────────────────
+    ac1, ac2 = st.columns([2, 1])
+    with ac1:
+        processed_dir = st.text_input(
+            "Processed data directory", value=str(DEFAULT_PROCESSED_DIR),
+            help="Directory containing etf_prices_{db,ib,filtered}.parquet",
+        )
+    with ac2:
+        refresh_from_ib = st.checkbox(
+            "Refresh from IB before load",
+            value=False,
+            help=(
+                "Runs IBDataCollector against IB Gateway (client_id 31). "
+                "Skips tickers already current; only stale/missing incur an "
+                "IB request. A fully-current cache costs seconds; a stale "
+                "cache costs minutes; a missing cache costs hours."
+            ),
+        )
+
     if st.button("Load / refresh price matrix", type="primary"):
+        # Optional IB refresh first.
+        if refresh_from_ib:
+            work = (status or {}).get("n_stale", 0) + (status or {}).get("n_missing", 0)
+            with st.status(
+                f"Refreshing {work} tickers from IB Gateway…",
+                expanded=True,
+            ) as status_box:
+                progress = st.progress(0.0)
+                progress_label = st.empty()
+
+                def _cb(i: int, total: int, ticker: str):
+                    progress.progress(min(i / max(total, 1), 1.0))
+                    progress_label.markdown(f"`{i}/{total}` — {ticker}")
+
+                try:
+                    result = refresh_prices_from_ib(
+                        processed_dir=Path(processed_dir),
+                        progress_callback=_cb,
+                    )
+                    status_box.update(
+                        label=(
+                            f"IB refresh done — {result.n_current} current, "
+                            f"{result.n_stale} stale, {result.n_missing} missing."
+                        ),
+                        state="complete",
+                        expanded=False,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    status_box.update(
+                        label=f"IB refresh failed: {exc}",
+                        state="error",
+                    )
+                    st.stop()
+
         with st.spinner("Loading prices…"):
             try:
                 load = collect_prices(policy, processed_dir=Path(processed_dir))
@@ -326,8 +402,8 @@ with tab_collect:
         age_days = (pd.Timestamp.utcnow().normalize() - load.end_date.normalize()).days
         if age_days > 3:
             st.warning(
-                f"Latest bar is {age_days} days old — refresh via "
-                f"`scripts/daily_etf_data.py` if you need current data."
+                f"Latest bar in loaded matrix is {age_days} days old — tick "
+                f"*Refresh from IB before load* and re-run if you need current data."
             )
         with st.expander("Latest prices (last 5 rows, first 10 tickers)"):
             st.dataframe(load.prices.iloc[-5:, :10])
