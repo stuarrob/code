@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import streamlit as st
 
+from pathlib import Path
+
 from src.portfolio.ib_state import (
     DEFAULT_IB_CLIENT_ID,
     DEFAULT_IB_HOST,
@@ -29,7 +31,16 @@ from src.portfolio.ib_state import (
     fetch_snapshot,
     load_nav_history,
 )
+from src.portfolio.pipeline import (
+    collect_prices,
+    optimize_portfolio,
+    portfolio_hhi,
+    portfolio_volatility,
+    score_factors,
+)
 from src.portfolio.policy import DEFAULT_POLICY_PATH, load_policy
+
+DEFAULT_PROCESSED_DIR = Path.home() / "trade_data" / "ETFTrader" / "processed"
 
 
 # ────────────────────────────────────────────────────────────────
@@ -67,9 +78,10 @@ except Exception as exc:
 _DEFAULTS = {
     "cash_budget": 0.0,
     "ib_snapshot": None,
-    "prices": None,
-    "factor_scores": None,
+    "price_load": None,
+    "scoring": None,
     "target_weights": None,
+    "opt_diagnostics": None,
     "proposed_trades": None,
     "explanation": None,
     "execution_receipt": None,
@@ -105,7 +117,7 @@ with st.sidebar:
     st.caption("Progress")
     _step_status = [
         ("1 · Cash budget", st.session_state["cash_budget"] > 0 or st.session_state["ib_snapshot"] is not None),
-        ("2 · Data collected", st.session_state["prices"] is not None),
+        ("2 · Data collected", st.session_state["price_load"] is not None),
         ("3 · Optimised", st.session_state["target_weights"] is not None),
         ("4 · Trades proposed", st.session_state["proposed_trades"] is not None),
         ("5 · Explained", st.session_state["explanation"] is not None),
@@ -278,11 +290,47 @@ with tab_setup:
 with tab_collect:
     st.header("Step 2 — collect ETF prices")
     st.markdown(
-        "Pulls the latest daily bars into `~/trade_data/ETFTrader/processed`. "
-        "The pipeline function will live in `src/portfolio/pipeline.py` "
-        "(extracted from `notebooks/scripts/s2_collect.py`)."
+        f"Loads the ETF price matrix from "
+        f"`{DEFAULT_PROCESSED_DIR}` and applies the quality filter "
+        f"(min {policy.factor_lookbacks.momentum} days of history, "
+        f"less than 10% missing bars). Priority order: Databento → IB → yfinance."
     )
-    st.button("Run collection", disabled=True, help="Wired in slice 3")
+    processed_dir = st.text_input(
+        "Processed data directory", value=str(DEFAULT_PROCESSED_DIR),
+        help="Directory containing etf_prices_{db,ib,filtered}.parquet",
+    )
+    if st.button("Load / refresh price matrix", type="primary"):
+        with st.spinner("Loading prices…"):
+            try:
+                load = collect_prices(policy, processed_dir=Path(processed_dir))
+                st.session_state["price_load"] = load
+                # Invalidate downstream artefacts.
+                for k in ("scoring", "target_weights", "opt_diagnostics",
+                          "proposed_trades", "explanation"):
+                    st.session_state[k] = None
+                st.success(
+                    f"Loaded `{load.source}` — {load.n_tickers} tickers, "
+                    f"{load.start_date:%Y-%m-%d} to {load.end_date:%Y-%m-%d}."
+                )
+            except (FileNotFoundError, ValueError) as exc:
+                st.session_state["price_load"] = None
+                st.error(str(exc))
+
+    load = st.session_state.get("price_load")
+    if load is not None:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Tickers", load.n_tickers)
+        c2.metric("Trading days", len(load.prices))
+        c3.metric("Start", f"{load.start_date:%Y-%m-%d}")
+        c4.metric("End", f"{load.end_date:%Y-%m-%d}")
+        age_days = (pd.Timestamp.utcnow().normalize() - load.end_date.normalize()).days
+        if age_days > 3:
+            st.warning(
+                f"Latest bar is {age_days} days old — refresh via "
+                f"`scripts/daily_etf_data.py` if you need current data."
+            )
+        with st.expander("Latest prices (last 5 rows, first 10 tickers)"):
+            st.dataframe(load.prices.iloc[-5:, :10])
 
 
 with tab_optimize:
@@ -290,11 +338,107 @@ with tab_optimize:
     st.markdown(
         f"Applies factor blend "
         f"({', '.join(f'{n}={w:.0%}' for n, w in policy.factor_weights.as_dict().items())}) "
-        f"then runs the cvxpy optimiser with min/max weight "
-        f"`{policy.min_weight:.0%}`/`{policy.max_weight:.0%}` and "
-        f"`{policy.num_positions}` target positions."
+        f"and runs the selected optimiser. Weight bounds "
+        f"`{policy.min_weight:.0%}`–`{policy.max_weight:.0%}` per position; "
+        f"target `{policy.num_positions}` positions."
     )
-    st.button("Run optimisation", disabled=True, help="Wired in slice 3")
+
+    load = st.session_state.get("price_load")
+    if load is None:
+        st.info("Load the price matrix in tab 2 first.")
+    else:
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            optimizer_type = st.selectbox(
+                "Optimiser",
+                ["rankbased", "mvo", "minvar", "simple"],
+                help=(
+                    "rankbased = exponential rank weights (default in the scripts). "
+                    "mvo = Robust Mean-Variance (matches the tech doc). "
+                    "minvar = Min-variance. simple = equal-weight top N."
+                ),
+            )
+        with c2:
+            st.caption(
+                "The tech document's canonical strategy uses `mvo`. The scripts "
+                "default to `rankbased`. This selector is intentional — the "
+                "diagnostic in `docs/RESEARCH_BACKLOG.md` #1 will resolve which "
+                "the applet should default to."
+            )
+
+        if st.button("Score + optimise", type="primary"):
+            with st.spinner("Scoring factors + running optimiser…"):
+                try:
+                    scoring = score_factors(load.prices, policy)
+                    weights = optimize_portfolio(
+                        scoring, load.prices, policy, optimizer_type=optimizer_type,
+                    )
+                    diagnostics = {
+                        "vol": portfolio_volatility(weights, load.prices),
+                        "hhi": portfolio_hhi(weights),
+                        "max_weight": float(weights.max()),
+                        "min_weight": float(weights[weights > 0].min()),
+                        "optimizer_type": optimizer_type,
+                        "active_weights": scoring.active_weights,
+                    }
+                    st.session_state["scoring"] = scoring
+                    st.session_state["target_weights"] = weights
+                    st.session_state["opt_diagnostics"] = diagnostics
+                    for k in ("proposed_trades", "explanation"):
+                        st.session_state[k] = None
+                    st.success(
+                        f"Target portfolio built — {len(weights)} positions, "
+                        f"HHI {diagnostics['hhi']:.4f}."
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Optimisation failed: {exc}")
+
+    weights = st.session_state.get("target_weights")
+    diag = st.session_state.get("opt_diagnostics")
+    scoring = st.session_state.get("scoring")
+    if weights is not None and diag is not None:
+        st.divider()
+        st.subheader("Target portfolio")
+
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Positions", len(weights))
+        m2.metric("Max weight", f"{diag['max_weight']:.2%}")
+        m3.metric("Min weight", f"{diag['min_weight']:.2%}")
+        m4.metric("HHI", f"{diag['hhi']:.4f}")
+        vol_display = "—" if diag["vol"] != diag["vol"] else f"{diag['vol']:.1%}"
+        m5.metric("Ex-ante vol", vol_display)
+
+        aw = diag["active_weights"]
+        if set(aw.keys()) != set(policy.factor_weights.as_dict().keys()):
+            st.caption(
+                "⚠️ Value factor skipped (no expense-ratio data). Weights used: "
+                + ", ".join(f"{n}={w:.0%}" for n, w in aw.items())
+            )
+
+        holdings = pd.DataFrame({
+            "ticker": weights.index,
+            "target_weight": weights.values,
+        }).sort_values("target_weight", ascending=False).reset_index(drop=True)
+
+        if scoring is not None:
+            factor_cols = list(scoring.factor_scores.columns)
+            for col in factor_cols:
+                holdings[f"score_{col}"] = holdings["ticker"].map(
+                    scoring.factor_scores[col]
+                )
+
+        st.dataframe(
+            holdings,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "target_weight": st.column_config.NumberColumn(format="%.2f%%"),
+                **{
+                    f"score_{c}": st.column_config.NumberColumn(format="%.2f")
+                    for c in (scoring.factor_scores.columns if scoring else [])
+                },
+            },
+        )
 
 
 with tab_propose:
