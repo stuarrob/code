@@ -107,6 +107,38 @@ The body of this document (starting at \S\ref{sec:changes3to4}, ``Changes from V
 
 The live policy at the time of the last major review (2026-07-09), captured in \S\ref{sec:canonical}, does not match that variant in three places: position count (20 vs 30), weight bounds (2--15\% vs 3--8\%), and default optimiser (RankBased in scripts vs MVO in the design). This drift is tracked as item P1 in \texttt{docs/RESEARCH\_BACKLOG.md}. Until resolved, \textbf{treat the Canonical Live Configuration section as authoritative for what is actually running}, and the design sections as historical context.
 
+\subsection{Design Principles}
+\label{sec:design_principles}
+
+Three principles govern every design choice in this system. They are non-negotiable: proposals that violate them are rejected regardless of in-sample Sharpe. New features must be evaluated against each before implementation.
+
+\subsubsection*{Principle 1 --- Deterministic decides, LLM narrates}
+
+All numbers that reach the broker (selections, weights, order sizes, stop levels) come from deterministic code in \texttt{src/}. Any LLM in the applet's Explain step only narrates the deterministic output. Under no design does a language model modulate a size, a weight, or a target position. Auditability requires that every payload be traceable to a pure function of policy and market data. Discussed further in the \texttt{ADR-0001} portfolio-applet decision record.
+
+\subsubsection*{Principle 2 --- No magical thinking on the knobs}
+
+Every numeric parameter in \texttt{configs/etf\_smart\_beta.toml} must trace to either published research or a dated backtest recorded in \texttt{docs/research/}. If the trace ends at ``seemed reasonable,'' it belongs on \texttt{docs/RESEARCH\_BACKLOG.md} with a target for empirical justification. Semi-annual revisits of the calibration are scheduled. This rules out both unaudited human intuition \emph{and} silent numerical drift from copied defaults.
+
+\subsubsection*{Principle 3 --- Slowly varying only; whipsaw is a disaster}
+\label{sec:principle_slowly_varying}
+
+Whipsaw --- any part of the system flipping decisions on noise --- is treated as evidence of overfitting, not evidence of alpha. In a non-ergodic system (\S\ref{sec:weight_justification}), whipsaw compounds negatively in log-space: each unnecessary round-trip erodes the time-average growth rate even when the arithmetic-mean signal looks unchanged. Concrete implications for every layer:
+
+\begin{itemize}[noitemsep]
+    \item \textbf{Long lookbacks are preferred over short.} The 252-day momentum and 60-day volatility windows are conservative choices that smooth noise. Any proposal to shorten a lookback must include an explicit whipsaw analysis on historical data.
+    \item \textbf{Rebalance drift thresholds err high.} The current 5\% threshold produces $\approx$6 rebalances per year. Tightening it to 2--3\% would produce more trading on smaller deviations --- textbook whipsaw. Wider thresholds are considered before tighter ones.
+    \item \textbf{Regime overlays require hysteresis.} If a market-regime signal is added (e.g. SPY vs 200-day moving average with a VIX guard, per adversarial-review item T2.1), it must include (a) N-day smoothing on the trigger and (b) a minimum dwell time of $\sim$30 days in either regime state before switching back. Flicker weekly and the overlay is worse than not having it.
+    \item \textbf{Factor timing is rejected on principle.} No design that dials individual factor weights up or down based on recent factor performance --- even if it looks like it would have worked in-sample. Factor timing is the archetypal whipsaw trap; the ergodicity argument amplifies its cost.
+    \item \textbf{Trailing stops must be calibrated to avoid market-noise triggers.} The current 10\% trailing width sits above typical intraday and one-week volatility for the universe. Anything materially tighter would trigger on ordinary noise.
+    \item \textbf{Correlation-clustering (when implemented, T2.2) uses a long window and updates infrequently.} Clusters computed on 6-month pairwise correlations and refreshed quarterly --- not weekly.
+    \item \textbf{Sentiment overrides at most semi-annually.} Discretionary weight tilts by the operator (see \S\ref{sec:weight_justification}, ``When to revise'') are a rare, deliberate act --- never a reaction to weekly headlines.
+    \item \textbf{Fundamental-data revisions (once value factor lands, T1.1) get smoothing.} Restated earnings and updated P/E ratios do not immediately propagate; changes are smoothed over $\geq$30 days.
+    \item \textbf{Any signal that fires and reverses within one rebalance period is noise.} If a proposed feature would flip a position in and out on a monthly cadence in backtests, it is rejected regardless of headline Sharpe.
+\end{itemize}
+
+The three principles together create a filter that admits deliberate, evidence-anchored, slowly-varying changes and refuses reactive ones.
+
 %% ============================================================
 \section{Canonical Live Configuration}
 \label{sec:canonical}
