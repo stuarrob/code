@@ -150,9 +150,7 @@ def compute_live_signals(
     Returns dict: {ticker: {signal_state, sma_signal, ref_vol,
                             price, sma_200, above_sma}}
     """
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-    from leveraged.signals import compute_signals
+    from src.leveraged.signals import compute_signals
 
     if references is None:
         references = DEFAULT_REFERENCES

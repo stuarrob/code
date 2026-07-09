@@ -33,7 +33,7 @@ def build_portfolio(
     Returns:
         target_weights: Series of ticker -> weight.
     """
-    from portfolio import (
+    from src.portfolio import (
         MeanVarianceOptimizer,
         MinVarianceOptimizer,
         RankBasedOptimizer,
@@ -95,7 +95,7 @@ def _print_holdings_detail(
 ) -> None:
     """Print a human-readable portfolio table with ETF names and factor scores."""
     try:
-        from utils.etf_names import lookup_names
+        from src.utils.etf_names import lookup_names
     except ImportError:
         return
 

@@ -1,0 +1,50 @@
+# ETFTrader — central conda environment
+# Install target: %APPDATA%\miniconda3\envs\etftrader
+# Create:  conda env create -f environment.yml
+# Update:  conda env update -f environment.yml --prune
+name: etftrader
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - pandas
+  - scipy
+  - scikit-learn
+  - numba
+  - pyarrow
+  - cvxpy
+  - osqp
+  - scs
+  - clarabel
+  - beautifulsoup4
+  - lxml
+  - requests
+  - urllib3
+  - openpyxl
+  - tabulate
+  - pyyaml
+  - python-dotenv
+  - gitpython
+  - peewee
+  - tenacity
+  - tqdm
+  - nest-asyncio
+  - matplotlib
+  - seaborn
+  - plotly
+  - altair
+  - streamlit
+  - jupyterlab
+  - ipykernel
+  - ipywidgets
+  - pytest
+  - pytest-asyncio
+  - pytest-cov
+  - pytest-mock
+  - pip
+  - pip:
+      - ib_insync==0.9.86
+      - yfinance
+      - curl_cffi
+      # - databento   # secondary project — enable later

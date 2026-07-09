@@ -9,15 +9,9 @@ Usage (from notebook):
     spot_matrix = collect_fx_spot(FX_SPOT_DIR, PROCESSED_DIR)
 """
 
-import sys
 from pathlib import Path
 
 import pandas as pd
-
-# Ensure src/ is importable
-_project_root = Path(__file__).resolve().parent.parent.parent
-if str(_project_root / "src") not in sys.path:
-    sys.path.insert(0, str(_project_root / "src"))
 
 
 def collect_fx_spot(
@@ -63,7 +57,7 @@ def collect_fx_spot(
 
     # Run collection via IB
     try:
-        from data_collection.fx_spot_collector import FXSpotCollector
+        from src.data_collection.fx_spot_collector import FXSpotCollector
         from ib_insync import IB
 
         ib = IB()

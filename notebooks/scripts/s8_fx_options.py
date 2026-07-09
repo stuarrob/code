@@ -11,15 +11,9 @@ Usage (from notebook):
     surface = collect_fx_options_historical(FX_DB_DIR, start, end)     # Databento
 """
 
-import sys
 from pathlib import Path
 
 import pandas as pd
-
-# Ensure src/ is importable
-_project_root = Path(__file__).resolve().parent.parent.parent
-if str(_project_root / "src") not in sys.path:
-    sys.path.insert(0, str(_project_root / "src"))
 
 
 def collect_fx_options(
@@ -65,7 +59,7 @@ def collect_fx_options(
 
     # Run collection via IB
     try:
-        from data_collection.fx_option_collector import FXOptionCollector
+        from src.data_collection.fx_option_collector import FXOptionCollector
         from ib_insync import IB
 
         ib = IB()
@@ -122,7 +116,7 @@ def collect_fx_options_historical(
     Returns:
         DataFrame with historical FX option surface data.
     """
-    from data_collection.databento_fx_collector import DatabentoFXCollector
+    from src.data_collection.databento_fx_collector import DatabentoFXCollector
 
     # Check cache first
     if use_cache:

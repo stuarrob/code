@@ -556,6 +556,12 @@ class MeanVarianceOptimizer:
             eligible = eligible[eligible >= self.min_score]
 
         k = min(self.num_positions, len(eligible))
+        if k == 0:
+            logger.warning(
+                "No ETFs meet min_score=%s; returning empty portfolio",
+                self.min_score,
+            )
+            return pd.Series(dtype=float)
         selected = eligible.nlargest(k).index.tolist()
 
         # Returns

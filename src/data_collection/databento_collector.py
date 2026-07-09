@@ -9,7 +9,7 @@ No cron, no rate limiting — just call update_tickers() when you
 need fresh data. Typical daily update completes in seconds.
 
 Usage:
-    from data_collection.databento_collector import DatabentoCollector
+    from src.data_collection.databento_collector import DatabentoCollector
 
     collector = DatabentoCollector()
     prices, results = collector.update_tickers(tickers)

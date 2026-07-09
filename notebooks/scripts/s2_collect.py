@@ -19,9 +19,6 @@ def collect_data(
 
     Returns wide DataFrame (dates x tickers) of close prices.
     """
-    import sys
-    sys.path.insert(0, str(cache_dir.parent.parent / "src"))
-
     prices_db_path = processed_dir / "etf_prices_db.parquet"
     prices_ib_path = processed_dir / "etf_prices_ib.parquet"
     prices_yf_path = processed_dir / "etf_prices_filtered.parquet"
@@ -45,7 +42,7 @@ def collect_data(
         cached = [f for f in cache_dir.glob("*.parquet") if f.stem != "manifest"]
         if len(cached) > 50:
             print(f"Building from {len(cached)} cached parquets...")
-            from data_collection.databento_collector import DatabentoCollector
+            from src.data_collection.databento_collector import DatabentoCollector
             collector = DatabentoCollector(cache_dir=str(cache_dir))
             prices = collector.build_price_matrix()
 
@@ -56,7 +53,7 @@ def collect_data(
 
     # Run on-demand update via Databento
     try:
-        from data_collection.databento_collector import DatabentoCollector
+        from src.data_collection.databento_collector import DatabentoCollector
 
         collector = DatabentoCollector(cache_dir=str(cache_dir))
         prices, results = collector.update_tickers(tickers)

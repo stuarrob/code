@@ -28,10 +28,9 @@ from pathlib import Path
 
 import pandas as pd
 
-# Project paths (same pattern as daily_fx_surface.py)
+# src.* is importable via editable install; sibling script dirs need to be added
+# because scripts/, signals/scripts/, notebooks/scripts/ are not installed packages.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 sys.path.insert(0, str(PROJECT_ROOT / "signals" / "scripts"))
 sys.path.insert(0, str(PROJECT_ROOT / "notebooks" / "scripts"))
 

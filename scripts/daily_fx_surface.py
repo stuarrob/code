@@ -30,11 +30,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# Project paths
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
+from src.fx_options.sabr import calibrate_surface, assign_tenor_bucket
 
-from fx_options.sabr import calibrate_surface, assign_tenor_bucket
+# scripts/ dir on sys.path so we can import sibling ib_wait.py.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 DATA_DIR = Path.home() / "trade_data" / "ETFTrader"
 FX_OPTIONS_DIR = DATA_DIR / "fx_options"
@@ -56,7 +56,7 @@ log = logging.getLogger("daily_fx")
 def collect_surfaces(skip_current: bool = True) -> pd.DataFrame:
     """Collect FX option surfaces for all currencies via IB."""
     from ib_wait import wait_for_ib
-    from data_collection.fx_option_collector import FXOptionCollector
+    from src.data_collection.fx_option_collector import FXOptionCollector
 
     ib = wait_for_ib(IB_HOST, IB_PORT, IB_CLIENT_ID)
 
@@ -72,7 +72,7 @@ def collect_surfaces(skip_current: bool = True) -> pd.DataFrame:
 def collect_spots() -> pd.DataFrame:
     """Collect FX spot rates for all currencies via IB."""
     from ib_wait import wait_for_ib
-    from data_collection.fx_spot_collector import FXSpotCollector
+    from src.data_collection.fx_spot_collector import FXSpotCollector
 
     ib = wait_for_ib(IB_HOST, IB_PORT, IB_CLIENT_ID + 1)
 
@@ -203,7 +203,7 @@ def main():
 
     if args.dry_run:
         log.info("DRY RUN — checking cache state only")
-        from data_collection.fx_option_collector import FXOptionCollector
+        from src.data_collection.fx_option_collector import FXOptionCollector
         collector = FXOptionCollector.__new__(FXOptionCollector)
         collector.cache_dir = FX_OPTIONS_DIR
         collector.currencies = ["EUR", "GBP", "AUD", "CAD", "CHF", "JPY"]

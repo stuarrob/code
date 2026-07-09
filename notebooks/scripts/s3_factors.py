@@ -37,14 +37,14 @@ def score_factors(
         - prices_basic: prices DataFrame with leveraged ETFs removed
         - factor_detail: DataFrame of individual factor scores per ticker
     """
-    from factors import (
+    from src.factors import (
         FactorIntegrator,
         MomentumFactor,
         QualityFactor,
         SimplifiedValueFactor,
         VolatilityFactor,
     )
-    from data_collection.etf_filters import filter_leveraged_etfs
+    from src.data_collection.etf_filters import filter_leveraged_etfs
 
     if factor_weights is None:
         factor_weights = DEFAULT_WEIGHTS.copy()

@@ -19,6 +19,34 @@ import pandas as pd
 TRAILING_STOP_PCT = 10  # 10% trailing stop on all buys
 
 
+def _compute_trail_qty(
+    ticker: str,
+    new_shares: int,
+    held_after_fill: int,
+    tickers_with_trail: set,
+) -> int:
+    """Determine the trailing-stop quantity for a BUY fill.
+
+    If a TRAIL stop already covers this ticker (from a prior run or an
+    earlier fill in this session), it is protecting the prior holding at
+    its own high-water mark — do not rebase it. Only cover the newly
+    added shares. Otherwise the position is fresh, so the new TRAIL must
+    cover the full post-fill holding.
+
+    Args:
+        ticker: The ticker being traded.
+        new_shares: Share qty just filled.
+        held_after_fill: Total held qty AFTER this fill (existing + new).
+        tickers_with_trail: Set of tickers with an open SELL TRAIL.
+
+    Returns:
+        Quantity to place on the new TRAIL SELL order.
+    """
+    if ticker in tickers_with_trail:
+        return new_shares
+    return held_after_fill
+
+
 def get_account_state(
     ib_host: str = "127.0.0.1",
     ib_port: int = 4001,
@@ -916,10 +944,21 @@ def execute_trades(
         if t["action"] != "SKIP"
     )
     existing_orders = ib.openTrades()
+
+    # Snapshot which tickers already have a SELL TRAIL open. Their stop
+    # level reflects the prior holding's high-water mark and must NOT be
+    # rebased — a top-up BUY only needs a new TRAIL for the new shares.
+    tickers_with_open_trail = {
+        ot.contract.symbol
+        for ot in existing_orders
+        if ot.order.orderType == "TRAIL" and ot.order.action == "SELL"
+    }
+
     cancelled = 0
     for ot in existing_orders:
         sym = ot.contract.symbol
-        if sym in trade_tickers:
+        # Only cancel duplicate ENTRY orders (MKT/LMT/STP) — never TRAILs.
+        if sym in trade_tickers and ot.order.orderType != "TRAIL":
             print(
                 f"  CANCEL duplicate: {ot.order.action}"
                 f" {int(ot.order.totalQuantity)} {sym}"
@@ -1112,28 +1151,40 @@ def execute_trades(
                     pos_map.get(ticker, 0) - shares
                 )
 
-        # TRAILING STOP on every BUY fill — covers FULL position
-        # (existing holding + new shares), since cancelling duplicate
-        # orders earlier would have removed any prior TRAIL stop.
+        # TRAILING STOP on every BUY fill. If a prior TRAIL already
+        # protects the existing holding, only cover the new shares (leave
+        # the old TRAIL's stop level intact). Otherwise this is a fresh
+        # position and the new TRAIL covers the full post-fill holding.
         # pos_map[ticker] is updated above to include just-filled shares.
         if (t["action"] == "BUY"
                 and status in ("Filled", "Submitted", "PreSubmitted")
                 and (fill and fill > 0 or limit_px)):
             stop_ref = fill if fill and fill > 0 else limit_px
-            full_qty = int(pos_map.get(ticker, shares))
-            ts_order = Order()
-            ts_order.action = "SELL"
-            ts_order.totalQuantity = full_qty
-            ts_order.orderType = "TRAIL"
-            ts_order.trailingPercent = trailing_stop_pct
-            ts_order.tif = "GTC"
-            ts_trade = ib.placeOrder(contract, ts_order)
-            ib.sleep(1)
-            init_stop = stop_ref * (1 - trailing_stop_pct / 100)
-            print(f"    TRAILING STOP {trailing_stop_pct}% on "
-                  f"{full_qty} shares (~${init_stop:.2f}): "
-                  f"{ts_trade.orderStatus.status}")
-            trailing_stops_placed += 1
+            trail_qty = _compute_trail_qty(
+                ticker=ticker,
+                new_shares=shares,
+                held_after_fill=int(pos_map.get(ticker, shares)),
+                tickers_with_trail=tickers_with_open_trail,
+            )
+            if trail_qty > 0:
+                ts_order = Order()
+                ts_order.action = "SELL"
+                ts_order.totalQuantity = trail_qty
+                ts_order.orderType = "TRAIL"
+                ts_order.trailingPercent = trailing_stop_pct
+                ts_order.tif = "GTC"
+                ts_trade = ib.placeOrder(contract, ts_order)
+                ib.sleep(1)
+                init_stop = stop_ref * (1 - trailing_stop_pct / 100)
+                mode = "top-up" if ticker in tickers_with_open_trail else "full"
+                print(f"    TRAILING STOP {trailing_stop_pct}% on "
+                      f"{trail_qty} shares ({mode}) "
+                      f"(~${init_stop:.2f}): "
+                      f"{ts_trade.orderStatus.status}")
+                # Subsequent BUYs of this ticker in the same run
+                # top up rather than rebase.
+                tickers_with_open_trail.add(ticker)
+                trailing_stops_placed += 1
 
     # Log execution
     log_file = live_dir / "execution_log.csv"
@@ -1420,6 +1471,14 @@ def fix_unfilled_orders(
             pos_map.get(sym, 0) + float(p.position)
         )
 
+    # Snapshot open SELL TRAILs so subsequent trailing-stop placements
+    # top up rather than rebase an existing stop level.
+    tickers_with_open_trail = {
+        ot.contract.symbol
+        for ot in ib.openTrades()
+        if ot.order.orderType == "TRAIL" and ot.order.action == "SELL"
+    }
+
     # ── SAFETY: filter out trades that are already satisfied ──
     verified_resubmit = []
     for t in to_resubmit:
@@ -1637,23 +1696,40 @@ def fix_unfilled_orders(
             "limit_price": limit_px, "order_type": effective_type,
         })
 
-        # Trailing stop on BUY orders
+        # Trailing stop on BUY orders — same top-up-vs-full rule as
+        # execute_trades: if a TRAIL already covers the prior holding,
+        # only cover the new shares; else cover the full post-fill qty.
         if (action == "BUY"
                 and status in ("Filled", "Submitted", "PreSubmitted")
                 and (fill and fill > 0 or limit_px)):
             stop_ref = fill if fill and fill > 0 else limit_px
-            ts_order = Order()
-            ts_order.action = "SELL"
-            ts_order.totalQuantity = shares
-            ts_order.orderType = "TRAIL"
-            ts_order.trailingPercent = trailing_stop_pct
-            ts_order.tif = "GTC"
-            ts_trade = ib.placeOrder(contract, ts_order)
-            ib.sleep(1)
-            init_stop = stop_ref * (1 - trailing_stop_pct / 100)
-            print(f"    TRAILING STOP {trailing_stop_pct}% "
-                  f"(~${init_stop:.2f}): {ts_trade.orderStatus.status}")
-            trailing_stops_placed += 1
+            held_after_fill = int(pos_map.get(ticker, 0) + shares)
+            trail_qty = _compute_trail_qty(
+                ticker=ticker,
+                new_shares=shares,
+                held_after_fill=held_after_fill,
+                tickers_with_trail=tickers_with_open_trail,
+            )
+            if trail_qty > 0:
+                ts_order = Order()
+                ts_order.action = "SELL"
+                ts_order.totalQuantity = trail_qty
+                ts_order.orderType = "TRAIL"
+                ts_order.trailingPercent = trailing_stop_pct
+                ts_order.tif = "GTC"
+                ts_trade = ib.placeOrder(contract, ts_order)
+                ib.sleep(1)
+                init_stop = stop_ref * (1 - trailing_stop_pct / 100)
+                mode = "top-up" if ticker in tickers_with_open_trail else "full"
+                print(f"    TRAILING STOP {trailing_stop_pct}% on "
+                      f"{trail_qty} shares ({mode}) "
+                      f"(~${init_stop:.2f}): "
+                      f"{ts_trade.orderStatus.status}")
+                # Keep pos_map + trail set in sync for later trades
+                # in the same run.
+                pos_map[ticker] = held_after_fill
+                tickers_with_open_trail.add(ticker)
+                trailing_stops_placed += 1
 
     # Log results
     log_file = live_dir / "execution_log.csv"

@@ -9,16 +9,10 @@ Usage (from notebook):
     results = run_leveraged_backtest(DATA_DIR, OUTPUT_DIR)
 """
 
-import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import pandas as pd
-
-# Ensure src/ is importable
-_project_root = Path(__file__).resolve().parent.parent.parent
-if str(_project_root / "src") not in sys.path:
-    sys.path.insert(0, str(_project_root / "src"))
 
 
 def run_leveraged_backtest(
@@ -44,8 +38,8 @@ def run_leveraged_backtest(
         Dict with keys: summary (DataFrame), histories (dict of DataFrames),
         trades (dict of DataFrames).
     """
-    from leveraged.backtest import CONFIGS, run_single_backtest, compute_metrics
-    from leveraged.universe import PAIRS, check_data_availability, load_pair_data
+    from src.leveraged.backtest import CONFIGS, run_single_backtest, compute_metrics
+    from src.leveraged.universe import PAIRS, check_data_availability, load_pair_data
 
     data_dir = Path(data_dir)
     output_dir = Path(output_dir)

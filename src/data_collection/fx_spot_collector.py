@@ -7,7 +7,7 @@ that are appended over time.
 
 Usage:
     from ib_insync import IB
-    from data_collection.fx_spot_collector import FXSpotCollector
+    from src.data_collection.fx_spot_collector import FXSpotCollector
 
     ib = IB()
     ib.connect("127.0.0.1", 4001, clientId=7, readonly=True)

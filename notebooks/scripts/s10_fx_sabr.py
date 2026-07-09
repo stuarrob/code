@@ -9,15 +9,9 @@ Usage (from notebook):
     signals = calibrate_and_build_signals(FX_CACHE_DIR, FX_SABR_DIR, PROCESSED_DIR)
 """
 
-import sys
 from pathlib import Path
 
 import pandas as pd
-
-# Ensure src/ is importable
-_project_root = Path(__file__).resolve().parent.parent.parent
-if str(_project_root / "src") not in sys.path:
-    sys.path.insert(0, str(_project_root / "src"))
 
 
 def calibrate_and_build_signals(
@@ -41,8 +35,8 @@ def calibrate_and_build_signals(
     Returns:
         DataFrame of SABR-based signals.
     """
-    from fx_options.sabr import calibrate_surface
-    from fx_options.signals import build_signals
+    from src.fx_options.sabr import calibrate_surface
+    from src.fx_options.signals import build_signals
 
     fx_sabr_dir = Path(fx_sabr_dir)
     fx_sabr_dir.mkdir(parents=True, exist_ok=True)

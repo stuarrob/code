@@ -13,7 +13,7 @@ Data flow:
     5. Output in FXOptionCollector format for SABR calibration
 
 Usage:
-    from data_collection.databento_fx_collector import DatabentoFXCollector
+    from src.data_collection.databento_fx_collector import DatabentoFXCollector
 
     collector = DatabentoFXCollector()
     surface_df = collector.fetch_history(
@@ -246,7 +246,7 @@ class DatabentoFXCollector:
         Returns:
             DataFrame matching FXOptionCollector format.
         """
-        from fx_options.black76 import implied_vol
+        from src.fx_options.black76 import implied_vol
 
         # Build futures price lookup: (date, symbol) -> close
         fut_prices = {}

@@ -730,7 +730,7 @@ def generate_trades(
 
     # Resolve ETF names
     try:
-        from utils.etf_names import lookup_names
+        from src.utils.etf_names import lookup_names
         all_trade_tickers = [t["ticker"] for t in trades]
         names = lookup_names(all_trade_tickers, use_yfinance=True)
     except ImportError:

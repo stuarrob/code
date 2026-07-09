@@ -18,11 +18,8 @@ def discover_universe(project_root: Path) -> tuple:
         - categories: dict mapping ticker -> category name
         - universe_df: DataFrame with ticker and category columns
     """
-    import sys
-    sys.path.insert(0, str(project_root / "src"))
-
-    from data_collection.comprehensive_etf_list import load_full_universe
-    from data_collection.etf_filters import LEVERAGED_ETFS
+    from src.data_collection.comprehensive_etf_list import load_full_universe
+    from src.data_collection.etf_filters import LEVERAGED_ETFS
 
     all_tickers, categories = load_full_universe()
 

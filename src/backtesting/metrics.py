@@ -266,7 +266,7 @@ class PerformanceMetrics:
         if len(returns) < 20:
             return 0.0
 
-        monthly_returns = returns.resample('M').apply(lambda x: (1 + x).prod() - 1)
+        monthly_returns = returns.resample('ME').apply(lambda x: (1 + x).prod() - 1)
         return monthly_returns.max() if len(monthly_returns) > 0 else 0.0
 
     def worst_month(self, returns: pd.Series) -> float:
@@ -274,7 +274,7 @@ class PerformanceMetrics:
         if len(returns) < 20:
             return 0.0
 
-        monthly_returns = returns.resample('M').apply(lambda x: (1 + x).prod() - 1)
+        monthly_returns = returns.resample('ME').apply(lambda x: (1 + x).prod() - 1)
         return monthly_returns.min() if len(monthly_returns) > 0 else 0.0
 
     def alpha(self, returns: pd.Series, benchmark_returns: pd.Series) -> float:

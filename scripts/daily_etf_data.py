@@ -28,7 +28,6 @@ from pathlib import Path
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 DATA_DIR = Path.home() / "trade_data" / "ETFTrader"
@@ -49,7 +48,7 @@ log = logging.getLogger("daily_etf")
 
 def get_universe() -> list:
     """Load the ETF universe ticker list."""
-    from data_collection.comprehensive_etf_list import load_full_universe
+    from src.data_collection.comprehensive_etf_list import load_full_universe
     tickers, _ = load_full_universe()
     return tickers
 
@@ -57,7 +56,7 @@ def get_universe() -> list:
 def collect_etf_data(tickers: list) -> pd.DataFrame:
     """Collect/update ETF price data via IB."""
     from ib_wait import wait_for_ib
-    from data_collection.ib_data_collector import IBDataCollector
+    from src.data_collection.ib_data_collector import IBDataCollector
 
     ib = wait_for_ib(IB_HOST, IB_PORT, IB_CLIENT_ID)
 
@@ -94,7 +93,7 @@ def main():
     log.info("Universe: %d tickers", len(tickers))
 
     if args.dry_run:
-        from data_collection.ib_data_collector import IBDataCollector
+        from src.data_collection.ib_data_collector import IBDataCollector
 
         class _DummyIB:
             pass

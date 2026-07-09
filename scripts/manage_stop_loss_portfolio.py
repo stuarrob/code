@@ -39,10 +39,6 @@ import pandas as pd
 import yfinance as yf
 from tabulate import tabulate
 
-# Add project root to path
-PROJECT_ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-
 from src.factors import (
     FactorIntegrator,
     MomentumFactor,

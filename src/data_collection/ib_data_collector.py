@@ -7,7 +7,7 @@ parquet caching, and resume support.
 
 Usage:
     from ib_insync import IB
-    from data_collection.ib_data_collector import IBDataCollector
+    from src.data_collection.ib_data_collector import IBDataCollector
 
     ib = IB()
     ib.connect("127.0.0.1", 4001, clientId=5, readonly=True)

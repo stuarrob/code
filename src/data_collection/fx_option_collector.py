@@ -14,7 +14,7 @@ files, building a historical volatility surface over time.
 
 Usage:
     from ib_insync import IB
-    from data_collection.fx_option_collector import FXOptionCollector
+    from src.data_collection.fx_option_collector import FXOptionCollector
 
     ib = IB()
     ib.connect("127.0.0.1", 4001, clientId=6, readonly=True)

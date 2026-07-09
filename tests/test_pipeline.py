@@ -10,17 +10,15 @@ Tests that verify:
 6. Data paths resolve correctly
 """
 
-import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
-# Project root
+# Project root (used to locate script files that we assert on for trailing-stop
+# checks — the src.* imports resolve via the editable install, not sys.path).
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-sys.path.insert(0, str(PROJECT_ROOT / "notebooks"))
 
 
 # ──────────────────────────────────────────────────────────
@@ -29,7 +27,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "notebooks"))
 
 def test_universe_size():
     """Full universe should have 5000+ tickers (curated + NASDAQ)."""
-    from data_collection.comprehensive_etf_list import load_full_universe
+    from src.data_collection.comprehensive_etf_list import load_full_universe
 
     tickers, cats = load_full_universe()
 
@@ -42,7 +40,7 @@ def test_universe_size():
 
 def test_curated_list_no_mutual_funds():
     """Curated list should not contain mutual funds."""
-    from data_collection.comprehensive_etf_list import get_all_tickers
+    from src.data_collection.comprehensive_etf_list import get_all_tickers
 
     known_mutual_funds = {"FFNOX", "VBMFX", "VBAAX", "VBIAX", "VBINX",
                           "VBLTX", "VSMGX", "VASGX", "FFGFX", "DGSIX", "VICEX"}
@@ -58,7 +56,7 @@ def test_curated_list_no_mutual_funds():
 
 def test_factor_scores_produced():
     """Factor scoring should produce scores for available tickers."""
-    from factors import (
+    from src.factors import (
         FactorIntegrator, MomentumFactor, QualityFactor,
         SimplifiedValueFactor, VolatilityFactor,
     )
@@ -96,7 +94,7 @@ def test_factor_scores_produced():
 
 def test_portfolio_correct_positions():
     """Portfolio should have exactly NUM_POSITIONS holdings."""
-    from portfolio import RankBasedOptimizer
+    from src.portfolio import RankBasedOptimizer
 
     scores = pd.Series(np.random.uniform(0, 1, 100),
                        index=[f"ETF{i:03d}" for i in range(100)])
@@ -116,8 +114,8 @@ def test_portfolio_correct_positions():
 
 def test_rebalance_bimonthly_max_6_per_year():
     """Bimonthly rebalancing should produce <= 6 rebalances per year."""
-    from backtesting import BacktestConfig, BacktestEngine, TransactionCostModel
-    from portfolio import RankBasedOptimizer, StopLossManager, ThresholdRebalancer
+    from src.backtesting import BacktestConfig, BacktestEngine, TransactionCostModel
+    from src.portfolio import RankBasedOptimizer, StopLossManager, ThresholdRebalancer
 
     np.random.seed(42)
     dates = pd.bdate_range("2022-01-01", periods=756)  # ~3 years
@@ -162,8 +160,8 @@ def test_rebalance_bimonthly_max_6_per_year():
 
 def test_rebalance_quarterly_max_4_per_year():
     """Quarterly rebalancing should produce ~4 rebalances per year."""
-    from backtesting import BacktestConfig, BacktestEngine, TransactionCostModel
-    from portfolio import RankBasedOptimizer, StopLossManager, ThresholdRebalancer
+    from src.backtesting import BacktestConfig, BacktestEngine, TransactionCostModel
+    from src.portfolio import RankBasedOptimizer, StopLossManager, ThresholdRebalancer
 
     np.random.seed(42)
     dates = pd.bdate_range("2022-01-01", periods=756)
@@ -212,7 +210,7 @@ def test_rebalance_quarterly_max_4_per_year():
 def test_trailing_stop_in_execute_script():
     """Execution script must place trailing stop on every BUY."""
     execute_path = PROJECT_ROOT / "notebooks" / "scripts" / "s7_execute.py"
-    code = execute_path.read_text()
+    code = execute_path.read_text(encoding="utf-8")
 
     # Check for TRAIL order type
     assert "orderType = \"TRAIL\"" in code or "orderType = 'TRAIL'" in code, \
@@ -237,7 +235,7 @@ def test_trailing_stop_in_execute_script():
 def test_trailing_stop_in_notebook():
     """Notebook Section 8 must place trailing stop on every BUY."""
     nb_path = PROJECT_ROOT / "notebooks" / "reference" / "08_full_pipeline.ipynb"
-    nb_text = nb_path.read_text()
+    nb_text = nb_path.read_text(encoding="utf-8")
 
     # .ipynb JSON escapes quotes, so check for the key identifiers
     assert "TRAIL" in nb_text, "Missing TRAIL order in notebook"
@@ -254,7 +252,7 @@ def test_trailing_stop_in_ib_execute():
     if not script_path.exists():
         pytest.skip("ib_execute_trades.py not found")
 
-    code = script_path.read_text()
+    code = script_path.read_text(encoding="utf-8")
     assert "TRAIL" in code, "Missing TRAIL in ib_execute_trades.py"
     assert "trailingPercent" in code or "trailing_percent" in code or \
            "TRAILING_STOP_PCT" in code, \

@@ -36,10 +36,10 @@ def run_backtest(
     Returns:
         dict with keys: metrics, daily_values, results (full engine output)
     """
-    from backtesting import (
+    from src.backtesting import (
         BacktestConfig, BacktestEngine, TransactionCostModel,
     )
-    from portfolio import (
+    from src.portfolio import (
         RankBasedOptimizer, StopLossManager, ThresholdRebalancer,
     )
 

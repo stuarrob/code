@@ -66,8 +66,8 @@ class MomentumFactor(BaseFactor):
         self.validate_data(prices)
 
         # Get relevant price points
-        # End price: skip_recent days ago (to avoid reversal)
-        end_idx = -self.skip_recent if self.skip_recent > 0 else len(prices)
+        # End price: skip_recent days ago (to avoid reversal); -1 (today) if not skipping.
+        end_idx = -self.skip_recent if self.skip_recent > 0 else -1
         end_prices = prices.iloc[end_idx]
 
         # Start price: lookback days ago
@@ -172,7 +172,7 @@ class DualMomentumFactor(MomentumFactor):
         momentum_scores = super().calculate(prices)
 
         # Calculate raw momentum for absolute filter
-        end_idx = -self.skip_recent if self.skip_recent > 0 else len(prices)
+        end_idx = -self.skip_recent if self.skip_recent > 0 else -1
         end_prices = prices.iloc[end_idx]
         start_prices = prices.iloc[-self.lookback_period]
         raw_momentum = (end_prices / start_prices) - 1
