@@ -1,0 +1,12 @@
+# ETFTrader applet — local-only config.
+#
+# Bind to loopback so the applet is never accessible from the LAN or WAN.
+# The applet reads a live IBKR account; do not open it to any other host.
+
+[server]
+address = "127.0.0.1"
+port = 8501
+headless = false
+
+[browser]
+gatherUsageStats = false
