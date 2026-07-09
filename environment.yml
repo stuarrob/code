@@ -42,6 +42,7 @@ dependencies:
   - pytest-asyncio
   - pytest-cov
   - pytest-mock
+  - nbstripout
   - pip
   - pip:
       - ib_insync==0.9.86
