@@ -14,12 +14,12 @@
 \geometry{margin=1in}
 
 \title{\textbf{Multi-Factor ETF Strategy with Automated Risk Management}\\
-\large Technical Investment Document}
+\large Technical Investment Document --- \emph{Living Edition}}
 
 \author{Quantitative Portfolio Management\\
-Backtest Period: February 2021 -- February 2026}
+Repository: \texttt{stuarrob/code} (branch \texttt{main})}
 
-\date{February 15, 2026 \\ Version 4.2}
+\date{Last major review: 2026-07-09 \\ Continuously maintained; see \S\ref{sec:living} and Change Log}
 
 \hypersetup{
     colorlinks=true,
@@ -48,7 +48,13 @@ Backtest Period: February 2021 -- February 2026}
 \maketitle
 
 \begin{abstract}
-This document specifies a systematic quantitative investment strategy combining multi-factor ETF selection with automated risk management via Interactive Brokers Gateway. The strategy employs four weighted factors---Momentum (35\%), Quality (30\%), Volatility (20\%), and Value (15\%)---integrated via weighted geometric mean. In Version~4.2, the ETF universe has been expanded to \textbf{4,953 ETFs} (999 liquid candidates after filtering), and portfolio construction uses \textbf{Robust Mean-Variance Optimisation (MVO)} with 30 positions and tight weight bounds (3--8\%). While na\"{\i}ve MVO is well-documented as an ``error maximiser'' (Michaud 1989), our implementation applies three layers of institutional-grade robustness---Ledoit-Wolf covariance shrinkage, Bayes-Stein return shrinkage, and Michaud resampling---which, combined with tight weight bounds, address each of the known MVO failure modes. Backtested over 5 years (February 2021 -- February 2026), the strategy achieves \textbf{12.1\% CAGR} with a \textbf{0.64 Sharpe ratio}, \textbf{0.95 Sortino ratio}, and \textbf{-22.2\% maximum drawdown}---beating the SPY benchmark on risk-adjusted returns (Sharpe 0.64 vs 0.59) with 25\% lower volatility (12.9\% vs 17.1\%). Quarterly rebalancing with a 5\% drift threshold produces \textbf{fewer than 1 rebalance per year}.
+This is the \textbf{operating document} for a live-money systematic ETF strategy running against an Interactive Brokers account. It is designed to be read \emph{instead of the code}, and to remain accurate to the code as the code evolves. It combines a specification of the strategy, a canonical statement of the currently-live policy values, an adversarial review of known limitations, and a change log.
+
+The strategy selects ETFs from a broad US-listed universe using a weighted geometric mean of four factors: momentum, quality, low-volatility, and value. Factor weights (currently 35/30/20/15) are held as an \emph{informed prior} rather than an in-sample optimum, on ergodicity-economics grounds described in \S\ref{sec:weight_justification}. Portfolio construction is rank-based with top-N selection (currently N=20) and exponential rank weights. Risk management is via percentage-based trailing stops placed on every entry.
+
+The document is deliberately organised so that (a) values which can drift are pulled into a single \emph{Canonical Live Configuration} section (\S\ref{sec:canonical}) that mirrors \texttt{configs/etf\_smart\_beta.toml}, (b) the strategy narrative in the body describes the design intent regardless of specific parameter values, and (c) an \emph{Adversarial Review} section (\S\ref{sec:adversarial}) records known flaws with dated action plans. Historical backtest metrics referenced in the body describe design-time analyses; live-account performance is reported separately in the change log.
+
+Reader assumption: you are a serious investor with real money in this system, not a marketing target. Numbers that are unknown or degraded are stated as such rather than papered over.
 \end{abstract}
 
 \newpage
@@ -56,8 +62,245 @@ This document specifies a systematic quantitative investment strategy combining 
 \newpage
 
 %% ============================================================
-\section{Executive Summary}
+\section{Living Document Compact}
+\label{sec:living}
 %% ============================================================
+
+\subsection{Purpose and Reader Contract}
+
+This document is the single reading surface for the strategy. The operator has explicitly declared that they read this document rather than the code as the primary way to understand what the system does and why. That places three obligations on the document:
+
+\begin{enumerate}[noitemsep]
+    \item \textbf{Accuracy over marketing.} If the live configuration differs from a value described in a body section, the discrepancy is a documentation bug and must be reconciled. Never present a stale spec as if it were current.
+    \item \textbf{Honesty over optimism.} Known limitations get their own section (\S\ref{sec:adversarial}) and remain there until fixed. Backtest performance is separated from live performance; both are labelled.
+    \item \textbf{Provenance.} Every material claim traces to either (a) the code / policy file (with path), (b) a dated research note under \texttt{docs/research/}, or (c) published academic literature. If a claim traces only to intuition, it says so.
+\end{enumerate}
+
+\subsection{How to Keep This Document Living}
+
+The canonical sources of truth are, in order of authority:
+
+\begin{enumerate}[noitemsep]
+    \item \texttt{configs/etf\_smart\_beta.toml} --- the live policy parameters (weights, position count, bounds, stops, etc.).
+    \item Files under \texttt{src/} --- the deterministic pipeline. In case of conflict with the doc, code wins and the doc gets fixed.
+    \item \texttt{docs/research/} --- dated research notes justifying policy values.
+    \item \texttt{docs/RESEARCH\_BACKLOG.md} --- open questions and their status.
+    \item \texttt{git log} --- authoritative for ``when did this change and why.''
+\end{enumerate}
+
+\textbf{Update triggers.} This document must be edited (and the Change Log at \S\ref{sec:changelog} appended) whenever:
+
+\begin{itemize}[noitemsep]
+    \item A value in \texttt{configs/etf\_smart\_beta.toml} is changed.
+    \item A factor definition changes in \texttt{src/factors/}.
+    \item A risk-management rule changes in \texttt{src/portfolio/risk\_manager.py} or the execution scripts.
+    \item A new research note lands under \texttt{docs/research/}.
+    \item An entry in the Adversarial Review (\S\ref{sec:adversarial}) is closed out, opened, or reprioritised.
+    \item Real-money performance is measured at any milestone (quarter-end, year-end, or notable drawdown/rebound).
+\end{itemize}
+
+If a change is made to code or policy without a corresponding doc edit, that is a bug against \emph{this document}, not the code.
+
+\subsection{Known Drift Between Body Sections and Live Configuration}
+
+The body of this document (starting at \S\ref{sec:changes3to4}, ``Changes from Version 3.0 and Why They Matter'', through the Factor Framework and Portfolio Construction sections) describes a strategy variant that was designed and backtested in early 2026 --- 30 positions, tight 3--8\% weight bounds, robust MVO as default, quarterly rebalance. That variant is a legitimate design that produced the backtest metrics referenced.
+
+The live policy at the time of the last major review (2026-07-09), captured in \S\ref{sec:canonical}, does not match that variant in three places: position count (20 vs 30), weight bounds (2--15\% vs 3--8\%), and default optimiser (RankBased in scripts vs MVO in the design). This drift is tracked as item P1 in \texttt{docs/RESEARCH\_BACKLOG.md}. Until resolved, \textbf{treat the Canonical Live Configuration section as authoritative for what is actually running}, and the design sections as historical context.
+
+%% ============================================================
+\section{Canonical Live Configuration}
+\label{sec:canonical}
+%% ============================================================
+
+The values below are the current live policy. They mirror \texttt{configs/etf\_smart\_beta.toml}. When the TOML changes, this section changes and the Change Log records the diff.
+
+\subsection{Portfolio Construction Parameters}
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lll}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Justification} \\
+\midrule
+\texttt{num\_positions} & 20 & Historic default; drift from tech-doc target of 30 tracked in backlog \\
+\texttt{min\_weight} & 2\% & Historic default \\
+\texttt{max\_weight} & 15\% & Historic default; tech-doc target 8\% \\
+\texttt{tax\_status} & \texttt{taxable} & Operator declared taxable status \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Factor Weights (informed prior)}
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lll}
+\toprule
+\textbf{Factor} & \textbf{Weight} & \textbf{Justification} \\
+\midrule
+momentum   & 35\% & See \S\ref{sec:weight_justification} --- informed prior \\
+quality    & 30\% & Insurance premium against drawdown asymmetry \\
+volatility & 20\% & Insurance premium; low-vol anomaly \\
+value      & 15\% & \textbf{Proxied by expense ratio only --- see \S\ref{sec:adversarial} T1.1} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Factor Calculation Windows}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+\texttt{momentum} lookback & 252 trading days (AQR / Jegadeesh-Titman) \\
+\texttt{momentum\_skip\_recent} & 21 trading days (Novy-Marx 2012 short-term reversal skip) \\
+\texttt{quality} lookback & 252 trading days \\
+\texttt{value} lookback & 252 trading days \\
+\texttt{volatility} lookback & 60 trading days \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Rebalancing}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Justification} \\
+\midrule
+\texttt{frequency} & \texttt{bimonthly} (\textasciitilde 6/yr) & Historic default; tech-doc target quarterly \\
+\texttt{drift\_threshold} & 5\% & Round number; not calibrated \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Risk Management}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Justification} \\
+\midrule
+\texttt{entry\_stop\_loss\_pct} & 12\% & Round number; not calibrated \\
+\texttt{trailing\_stop\_pct}   & 10\% & Round number; not calibrated \\
+\texttt{cash\_reserve}         & \$70{,}000 & Round number; $\approx$18\% of current NAV \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Optimiser Priors (used by MVO variant)}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Notes} \\
+\midrule
+\texttt{risk\_aversion}      & 1.5 & Standard MVO $\lambda$; risk-tolerant end of retail range \\
+\texttt{robustness\_penalty} & 0.7 & Axioma $\gamma$; aggressive; not calibrated \\
+\texttt{turnover\_penalty}   & 0.2 & Medium; not calibrated \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%% ============================================================
+\section{Adversarial Review and Known Limitations}
+\label{sec:adversarial}
+%% ============================================================
+
+This section records material flaws in the strategy in the operator's own commissioned adversarial review (2026-07-09). Items remain here until closed; closed items move to the Change Log with the date and commit that closed them. Tiering is by impact-on-live-money:
+
+\begin{itemize}[noitemsep]
+    \item \textbf{Tier 1 (T1)} --- material design flaw; can cause the strategy to underperform or misbehave in ways the operator does not consent to.
+    \item \textbf{Tier 2 (T2)} --- significant weakness; should be addressed before scaling capital or before a live BIG-switch (\S\ref{sec:trade_execution}).
+    \item \textbf{Tier 3 (T3)} --- smaller nudge; worth investigating; unlikely to change conclusions materially.
+\end{itemize}
+
+\subsection{T1 --- Material design flaws}
+
+\subsubsection{T1.1 The value factor is fake}
+\label{sec:t1_1}
+
+\texttt{src.factors.SimplifiedValueFactor} returns $-1 \times \text{expense ratio}$. This is a low-fee preference, not a value factor. Real value factors use fundamental multiples (P/E, P/B, dividend yield, EBITDA/EV). Consequences:
+
+\begin{enumerate}[noitemsep]
+    \item The integrated score is genuinely a three-factor score, not four. The 15\% weight allocated to ``value'' is buying almost nothing.
+    \item The natural regime hedge that value provides --- value tends to outperform when growth/momentum breaks (2000--2002, 2022) --- is absent from the model.
+    \item In an AI-tech unwind scenario, this is the single largest reason the strategy has less protection than the factor weights suggest.
+\end{enumerate}
+
+\textbf{Fix.} Replace the expense-ratio proxy with a fundamental composite (P/E, P/B, dividend yield) pulled from a data source. For ETFs, per-ticker fundamentals aggregate to weighted-average holding metrics; \texttt{yfinance} \texttt{ticker.info} exposes several. Estimated effort: 1--2 evenings.
+
+\textbf{Priority: highest single-value fix in the system.}
+
+\subsubsection{T1.2 Survivorship bias in the cached universe}
+
+The per-ticker parquet cache at \texttt{\~{}/trade\_data/ETFTrader/ib\_historical/} contains only ETFs that still trade. ETFs that were delisted, merged, or liquidated over 2021--2026 are absent. Every backtest run on this cache overstates historical performance by the average return of the survivors relative to the true universe. The effect is smaller for ETFs than single stocks (ETF closures are rarer, mostly small AUM), but non-zero.
+
+\textbf{Fix.} True fix (point-in-time universe reconstruction) requires Bloomberg / CRSP-tier data and is out of scope. \textbf{Realistic mitigation:} apply a 1--2\% haircut to backtested CAGR whenever it is quoted, and cross-check against SPY over the same window. Do not treat backtested CAGR as a forward expectation.
+
+\subsubsection{T1.3 Look-ahead bias is presumed absent but never proved}
+
+Factor calculations are called with \texttt{prices.loc[:rebalance\_date]} in the diagnostic pipeline. This should mean no factor sees future data. But no pinning test exists that asserts this. If any factor calculation quietly uses \texttt{.mean()} or \texttt{.std()} over a window that includes $t{+}1$ data, the backtest is silently inflated.
+
+\textbf{Fix.} Add a test to \texttt{tests/test\_factors/} that: (a) computes factor scores at date $t$ on a small synthetic price series, (b) shifts prices by 1 day and recomputes, (c) asserts the score at $t$ is unchanged. Estimated effort: 2 hours. \textbf{Should have been part of the initial factor test suite.}
+
+\subsection{T2 --- Significant weaknesses}
+
+\subsubsection{T2.1 No regime awareness}
+
+The strategy runs identically in bull, bear, and crisis regimes. Long-only, concentrated (top-20), 22\% cash reserve, 10\% trailing stops. There is no signal to de-risk in a rising-VIX / breadth-collapsing environment. The 22\% cash reserve is a \emph{fixed allocation}, not a regime-responsive hedge.
+
+\textbf{Fix.} Add a portfolio-level trend filter as an overlay. Rule: if SPY closes below its 200-day moving average AND VIX $>$ 25, shift target equity exposure from 100\% to 60\%, hold the remainder in short-term Treasuries (SHV or BIL). This is documented crash protection --- not market-timing --- and has substantial backtest support in the Meb Faber IVY portfolio literature. Estimated effort: 1 evening.
+
+\subsubsection{T2.2 Correlation blindness in top-N selection}
+
+The integrated factor score picks the top-N ETFs. It does not check whether the top-N are highly correlated with each other. The current 28-position live holdings read as a broad international dividend / value / quality tilt with likely pairwise correlations of 0.6--0.8 across most positions. The effective portfolio Sharpe is lower than the individual position Sharpes would suggest.
+
+\textbf{Fix.} In the selection step: rank candidates by score, cluster the top 2N by pairwise return correlation (hierarchical clustering over the last 6 months), then pick the top-scored representative from each cluster until N positions are filled. Same signal, better diversification. Estimated effort: 1 evening.
+
+\subsubsection{T2.3 Conviction magnitude is discarded}
+
+The integrated factor score has a magnitude that is not used. Position \#1 at rank 0.95 and position \#20 at rank 0.62 are subject to the same weight bounds. The RankBased exponential weighting partially mitigates but is coarse. The MVO variant uses score-as-alpha but with tight bounds that suppress conviction.
+
+\textbf{Fix.} Feed score magnitude into the optimiser as expected-return alpha, allowing tighter clustering around the strongest signals. Estimated effort: 1 evening. Lower priority than T2.1 and T2.2.
+
+\subsection{T3 --- Smaller nudges}
+
+\subsubsection{T3.1 Factor lookback windows are convention, not calibrated}
+
+252/21/60 are the AQR convention (Jegadeesh-Titman 12-1; standard 60d vol). Never tested for optimality in this universe. Momentum is relatively robust to lookback choice; volatility less so. A grid search over lookback pairs would be cheap and informative. Estimated effort: 1 evening.
+
+\subsubsection{T3.2 Risk parameters are round numbers}
+
+Trailing 10\%, entry 12\%, cash \$70k, drift 5\%, weight bounds 2--15\%. All defensible, all round, none calibrated. A sensitivity grid would locate them on the risk-return frontier. Estimated effort: 1 weekend.
+
+\subsubsection{T3.3 Rebalance frequency untested}
+
+Bimonthly (6/yr) vs quarterly (4/yr). Turnover cost vs signal freshness trade-off never explicitly measured on this universe. Estimated effort: 1 evening.
+
+\subsection{Prioritised Fix Order}
+
+Recommended sequence to address the flaws above:
+
+\begin{enumerate}[noitemsep]
+    \item \textbf{T1.3} (look-ahead pinning test) --- 2 hours; proves the model is not silently a lie.
+    \item \textbf{T1.1} (real value factor) --- 1--2 evenings; single highest-impact fix.
+    \item \textbf{T2.1} (regime overlay) --- 1 evening; drawdown protection before live orders resume.
+    \item \textbf{T2.2} (correlation clustering) --- 1 evening; effective diversification.
+    \item \textbf{T1.2} (survivorship bias haircut) --- 1 hour; honesty in reporting.
+    \item \textbf{T2.3, T3.\*} --- as time permits.
+\end{enumerate}
+
+Each closed item is logged in \S\ref{sec:changelog} with the closing commit SHA.
+
+
 
 \subsection{Strategy at a Glance}
 
@@ -138,6 +381,9 @@ Cash Reserve & \$40,000 & Maintained for rebalancing \\
 
 %% ============================================================
 \section{Changes from Version 3.0 and Why They Matter}
+\label{sec:changes3to4}
+% NOTE: This section describes the design of v4.x, which does not fully match the
+% currently-live policy. See \S\ref{sec:canonical} for what is actually running.
 %% ============================================================
 
 \subsection{Universe Expansion: 1,459 $\rightarrow$ 4,953 ETFs}
@@ -802,6 +1048,7 @@ The strategy is implemented as a 7-step automated pipeline. Each step is an inde
 \end{itemize}
 
 \subsection{Trade Execution Flow}
+\label{sec:trade_execution}
 
 \begin{enumerate}
     \item Connect to IB Gateway (port 4001)
@@ -921,9 +1168,44 @@ Min Daily Volume & 50,000 shares \\
 
 \vspace{1cm}
 
-\noindent\textbf{Document Version:} 4.2 \\
-\textbf{Date:} February 15, 2026 \\
-\textbf{Status:} Production Ready \\
-\textbf{Author:} Stuart with Claude AI Assistance
+%% ============================================================
+\section{Change Log}
+\label{sec:changelog}
+%% ============================================================
+
+Entries are chronological, most recent first. Each entry cites the git commit that closes it (short SHA). \textbf{Update rule:} every commit that touches \texttt{configs/etf\_smart\_beta.toml}, \texttt{src/factors/}, \texttt{src/portfolio/}, or the execution scripts must also append an entry here or explain why not.
+
+\subsection*{2026-07-09 --- Living Edition; adversarial review + weight justification}
+
+Commits: \texttt{d9826dc}, plus this one.
+
+\begin{itemize}[noitemsep]
+    \item Reframed the document as a \emph{living operating document} rather than a fixed v4.2 spec. New \S\ref{sec:living} explains the reader contract, sources of truth, and update triggers.
+    \item Added \S\ref{sec:canonical} pulling the live policy values from \texttt{configs/etf\_smart\_beta.toml} into a single source-of-truth table. Explicit acknowledgement that the body sections describing v4.x design details drift from the live policy in three places (position count 20 vs 30, weight bounds 2--15\% vs 3--8\%, default optimiser RankBased vs MVO).
+    \item Added \S\ref{sec:adversarial} with tiered flaws from the operator's own commissioned adversarial review:
+    \begin{itemize}[noitemsep]
+        \item T1.1 The ``value'' factor is fake (expense-ratio proxy only). Highest single-value fix.
+        \item T1.2 Survivorship bias in cached universe; mitigation via CAGR haircut.
+        \item T1.3 Look-ahead bias presumed absent but never proved by a pinning test.
+        \item T2.1 No regime awareness; proposed SPY-200d + VIX overlay.
+        \item T2.2 Correlation blindness in top-N selection; proposed clustering step.
+        \item T2.3 Conviction magnitude discarded.
+        \item T3.1--T3.3 Untested lookbacks, round-number risk params, unmeasured rebalance frequency.
+    \end{itemize}
+    \item Added \S\ref{sec:weight_justification} (in the Factor Framework section) recording the July~2026 recalibration review. Records the ergodicity-economics case for retaining 35/30/20/15 as an insurance-premium-bearing informed prior rather than adopting the momentum-heavy in-sample winner. Cites Peters (2019), Kelly (1956), Thorp (2006), Taleb (2018).
+\end{itemize}
+
+\subsection*{2026-02-15 --- Version 4.2 (previous major revision)}
+
+\begin{itemize}[noitemsep]
+    \item Documented the v4.x design: 4{,}953-ETF universe, 30 positions, tight 3--8\% weight bounds, robust MVO default with Ledoit-Wolf + Bayes-Stein + Michaud resampling, quarterly rebalance. This design was backtested and documented; the live policy has since diverged in the three places noted above.
+    \item Recorded backtest results: 12.1\% CAGR / 0.64 Sharpe / 0.95 Sortino / -22.2\% MaxDD over Feb 2021--Feb 2026 for the v4.2 design.
+\end{itemize}
+
+\vspace{1cm}
+
+\noindent\textbf{Document status:} Living \\
+\textbf{Last major review:} 2026-07-09 \\
+\textbf{Authoring:} Operator with AI assistance; every commit signed via git
 
 \end{document}
