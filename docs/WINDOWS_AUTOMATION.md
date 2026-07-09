@@ -83,9 +83,11 @@ AcceptIncomingConnectionAction=accept
 AcceptNonBrokerageAccountWarning=yes
 DismissPasswordExpiryWarning=yes
 DismissNSEComplianceNotice=yes
-ReadOnlyApi=no
-# ReadOnlyApi=yes if you only want data feeds (safer default)
-# — leave as `no` here since daily_etf_data.py works either way.
+ReadOnlyApi=yes
+# ADR-0001 requires Read-Only API by default: nightly cron + all
+# read-only applet steps work fine. To place a trade you must flip
+# ReadOnlyApi off in Gateway's UI first — that's the intended,
+# conscious gate for order execution.
 
 # --- Auto-restart daily so IB's forced logout doesn't kill us ---
 AutoRestartTime=23:45
