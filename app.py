@@ -198,17 +198,31 @@ with tab_setup:
     snap = st.session_state.get("ib_snapshot")
     if snap is not None:
         st.divider()
-        m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("NAV", f"${snap.nav:,.0f}")
-        m2.metric("Cash", f"${snap.cash:,.0f}")
-        m3.metric("Buying Power", f"${snap.buying_power:,.0f}")
-        m4.metric("Unrealized P&L", f"${snap.unrealized_pnl_reported:,.0f}")
-        m5.metric("Realized P&L", f"${snap.realized_pnl_reported:,.0f}")
+
+        # Row 1 — top-line financial state (mirrors Client Portal top strip)
+        r1c1, r1c2, r1c3, r1c4, r1c5 = st.columns(5)
+        r1c1.metric("NAV", f"${snap.nav:,.0f}")
+        r1c2.metric("Cash", f"${snap.cash:,.0f}")
+        r1c3.metric("Buying Power", f"${snap.buying_power:,.0f}")
+        r1c4.metric(
+            "Daily P&L",
+            "—" if snap.daily_pnl != snap.daily_pnl else f"${snap.daily_pnl:,.0f}",
+        )
+        r1c5.metric("Unrealized P&L", f"${snap.unrealized_pnl_reported:,.0f}")
+
+        # Row 2 — margin / liquidity health
+        r2c1, r2c2, r2c3, r2c4, r2c5 = st.columns(5)
+        r2c1.metric("Realized P&L", f"${snap.realized_pnl_reported:,.0f}")
+        r2c2.metric("Excess Liquidity", f"${snap.excess_liquidity:,.0f}")
+        r2c3.metric("Available Funds", f"${snap.available_funds:,.0f}")
+        r2c4.metric("Maintenance", f"${snap.maint_margin:,.0f}")
+        r2c5.metric("Initial Margin", f"${snap.init_margin:,.0f}")
+
         st.caption(
             f"Account **{snap.account}** · "
             f"Snapshot at {snap.timestamp:%Y-%m-%d %H:%M:%S %Z} · "
-            f"P&L values are as reported by IB `accountSummary` "
-            f"(labelling may reflect day/YTD depending on IB config)."
+            f"P&L values are as reported by IB (`Daily` from `reqPnL`, "
+            f"`Realized`/`Unrealized` from `accountSummary`)."
         )
 
         st.subheader("Equity curve (local snapshots)")
@@ -235,6 +249,7 @@ with tab_setup:
                     "avg_cost": st.column_config.NumberColumn(format="$%.2f"),
                     "market_price": st.column_config.NumberColumn(format="$%.2f"),
                     "market_value": st.column_config.NumberColumn(format="$%.0f"),
+                    "daily_pnl": st.column_config.NumberColumn(format="$%.0f"),
                     "unrealized_pnl": st.column_config.NumberColumn(format="$%.0f"),
                     "unrealized_pct": st.column_config.NumberColumn(format="%.2f%%"),
                 },

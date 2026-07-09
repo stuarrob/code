@@ -30,8 +30,11 @@ from src.portfolio.ib_state import (
 # Test helpers — build a fake ib_insync IB well enough to drive fetch_snapshot
 # ────────────────────────────────────────────────────────────────
 
-def _fake_contract(symbol: str) -> SimpleNamespace:
-    return SimpleNamespace(symbol=symbol, secType="STK", exchange="SMART", currency="USD")
+def _fake_contract(symbol: str, conid: int | None = None) -> SimpleNamespace:
+    return SimpleNamespace(
+        symbol=symbol, secType="STK", exchange="SMART", currency="USD",
+        conId=conid if conid is not None else abs(hash(symbol)) % 10_000_000,
+    )
 
 
 def _fake_account_value(tag: str, value: str, currency: str = "USD") -> SimpleNamespace:
@@ -41,9 +44,10 @@ def _fake_account_value(tag: str, value: str, currency: str = "USD") -> SimpleNa
 def _fake_portfolio_item(
     symbol: str, position: float, avg_cost: float,
     market_price: float, market_value: float, unrealized_pnl: float,
+    conid: int | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        contract=_fake_contract(symbol),
+        contract=_fake_contract(symbol, conid=conid),
         position=position,
         averageCost=avg_cost,
         marketPrice=market_price,
@@ -87,6 +91,8 @@ def _make_fake_ib(
     portfolio: list[SimpleNamespace] | None = None,
     positions: list[SimpleNamespace] | None = None,
     open_trades: list[SimpleNamespace] | None = None,
+    account_daily_pnl: float | None = 250.0,
+    single_pnl_by_conid: dict[int, float] | None = None,
 ) -> MagicMock:
     summary = summary or {
         "NetLiquidation": "500000",
@@ -95,6 +101,10 @@ def _make_fake_ib(
         "GrossPositionValue": "380000",
         "RealizedPnL": "1200.50",
         "UnrealizedPnL": "3400.00",
+        "ExcessLiquidity": "450000",
+        "AvailableFunds": "425000",
+        "MaintMarginReq": "50000",
+        "InitMarginReq": "75000",
     }
     fake_ib = MagicMock()
     fake_ib.managedAccounts.return_value = [account]
@@ -104,6 +114,18 @@ def _make_fake_ib(
     fake_ib.portfolio.return_value = portfolio or []
     fake_ib.positions.return_value = positions or []
     fake_ib.openTrades.return_value = open_trades or []
+
+    # Streaming reqPnL / reqPnLSingle — return objects that resolve to
+    # the requested dailyPnL values once ib.sleep() is called.
+    fake_ib.reqPnL.return_value = SimpleNamespace(
+        dailyPnL=account_daily_pnl if account_daily_pnl is not None else float("nan")
+    )
+    single_pnl_by_conid = single_pnl_by_conid or {}
+
+    def _fake_pnl_single(account_, model_, conid):
+        return SimpleNamespace(dailyPnL=single_pnl_by_conid.get(conid, float("nan")))
+
+    fake_ib.reqPnLSingle.side_effect = _fake_pnl_single
     return fake_ib
 
 
@@ -135,6 +157,11 @@ def test_fetch_snapshot_maps_account_summary_tags():
     assert snap.gross_position_value == 380000.0
     assert snap.realized_pnl_reported == 1200.50
     assert snap.unrealized_pnl_reported == 3400.00
+    assert snap.excess_liquidity == 450000.0
+    assert snap.available_funds == 425000.0
+    assert snap.maint_margin == 50000.0
+    assert snap.init_margin == 75000.0
+    assert snap.daily_pnl == 250.0
     assert isinstance(snap.timestamp, datetime)
 
 
@@ -239,17 +266,65 @@ def test_snapshot_no_managed_accounts_raises():
 def test_snapshot_positions_df_shape_and_pct():
     ib = _make_fake_ib(
         portfolio=[
-            _fake_portfolio_item("SPY", 100, 400.0, 450.0, 45000.0, 5000.0),
-            _fake_portfolio_item("QQQ", 50, 350.0, 340.0, 17000.0, -500.0),
-        ]
+            _fake_portfolio_item("SPY", 100, 400.0, 450.0, 45000.0, 5000.0, conid=1001),
+            _fake_portfolio_item("QQQ", 50, 350.0, 340.0, 17000.0, -500.0, conid=1002),
+        ],
+        single_pnl_by_conid={1001: 123.45, 1002: -67.89},
     )
     df = fetch_snapshot(ib).positions_df()
     assert list(df.columns) == [
         "ticker", "shares", "avg_cost", "market_price",
-        "market_value", "unrealized_pnl", "unrealized_pct",
+        "market_value", "daily_pnl", "unrealized_pnl", "unrealized_pct",
     ]
     spy_row = df[df["ticker"] == "SPY"].iloc[0]
     assert spy_row["unrealized_pct"] == pytest.approx(450.0 / 400.0 - 1.0)
+    assert spy_row["daily_pnl"] == pytest.approx(123.45)
+
+
+@pytest.mark.unit
+def test_daily_pnl_falls_back_to_nan_when_ib_sends_sentinel():
+    """IB's -1.797e308 magic-value and NaN both surface as NaN in the snapshot."""
+    ib = _make_fake_ib(
+        portfolio=[
+            _fake_portfolio_item("SPY", 100, 400.0, 450.0, 45000.0, 5000.0, conid=1001),
+        ],
+        account_daily_pnl=-1.7976931348623157e+308,
+        single_pnl_by_conid={1001: float("nan")},
+    )
+    snap = fetch_snapshot(ib)
+    assert snap.daily_pnl != snap.daily_pnl  # account NaN
+    assert snap.positions[0].daily_pnl != snap.positions[0].daily_pnl  # position NaN
+
+
+@pytest.mark.unit
+def test_daily_pnl_reqpnl_exception_degrades_gracefully():
+    """A failed reqPnL must not break the snapshot — just leaves NaN."""
+    ib = _make_fake_ib(
+        portfolio=[
+            _fake_portfolio_item("SPY", 100, 400.0, 450.0, 45000.0, 5000.0, conid=1001),
+        ],
+    )
+    ib.reqPnL.side_effect = RuntimeError("no PnL for account type")
+    snap = fetch_snapshot(ib)
+    assert snap.nav == 500000.0  # snapshot still populated
+    assert snap.daily_pnl != snap.daily_pnl  # NaN
+
+
+@pytest.mark.unit
+def test_daily_pnl_cancels_streaming_subscriptions():
+    """After fetch_snapshot returns, the streaming subs must be cancelled
+    so we don't leak subscriptions across applet reruns."""
+    ib = _make_fake_ib(
+        portfolio=[
+            _fake_portfolio_item("SPY", 100, 400.0, 450.0, 45000.0, 5000.0, conid=1001),
+            _fake_portfolio_item("QQQ", 50, 350.0, 340.0, 17000.0, -500.0, conid=1002),
+        ],
+        single_pnl_by_conid={1001: 100.0, 1002: -20.0},
+    )
+    fetch_snapshot(ib)
+    ib.cancelPnL.assert_called_once_with("U1234567")
+    conids_cancelled = {c.args[2] for c in ib.cancelPnLSingle.call_args_list}
+    assert conids_cancelled == {1001, 1002}
 
 
 @pytest.mark.unit
@@ -271,6 +346,8 @@ def _snap_with_nav(nav: float, cash: float, account: str = "U123",
         timestamp=when or datetime.now(timezone.utc),
         nav=nav, cash=cash, buying_power=0.0, gross_position_value=nav - cash,
         realized_pnl_reported=0.0, unrealized_pnl_reported=0.0,
+        daily_pnl=0.0, excess_liquidity=nav, available_funds=nav,
+        maint_margin=0.0, init_margin=0.0,
         positions=(), open_orders=(),
     )
 

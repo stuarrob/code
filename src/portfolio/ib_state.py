@@ -17,6 +17,7 @@ Per ADR-0001 and CLAUDE.md:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
@@ -48,14 +49,22 @@ DEFAULT_NAV_HISTORY_PATH = (
 
 @dataclass(frozen=True)
 class Position:
-    """A single held position at snapshot time."""
+    """A single held position at snapshot time.
+
+    ``daily_pnl`` comes from ``ib.reqPnLSingle`` (a streaming subscription
+    the snapshot briefly opens then cancels). It is ``float('nan')`` if
+    IB has not yet reported a value for the position within the polling
+    window.
+    """
 
     ticker: str
+    conid: int
     shares: float
     avg_cost: float
     market_price: float
     market_value: float
     unrealized_pnl: float
+    daily_pnl: float
 
 
 @dataclass(frozen=True)
@@ -83,7 +92,13 @@ class OpenOrder:
 
 @dataclass(frozen=True)
 class IBSnapshot:
-    """Complete read-only view of the IB account at a moment in time."""
+    """Complete read-only view of the IB account at a moment in time.
+
+    ``daily_pnl`` is from ``ib.reqPnL`` — the same P&L figure the
+    Client Portal shows in its top strip. All margin / liquidity
+    fields come from ``accountSummary``. Missing values default to
+    ``0.0``; presence is signalled by inspecting ``timestamp``.
+    """
 
     account: str
     timestamp: datetime
@@ -93,6 +108,11 @@ class IBSnapshot:
     gross_position_value: float
     realized_pnl_reported: float
     unrealized_pnl_reported: float
+    daily_pnl: float
+    excess_liquidity: float
+    available_funds: float
+    maint_margin: float
+    init_margin: float
     positions: tuple[Position, ...]
     open_orders: tuple[OpenOrder, ...]
 
@@ -123,13 +143,12 @@ class IBSnapshot:
 
     def positions_df(self) -> pd.DataFrame:
         """Positions as a display-ready DataFrame."""
+        columns = [
+            "ticker", "shares", "avg_cost", "market_price",
+            "market_value", "daily_pnl", "unrealized_pnl", "unrealized_pct",
+        ]
         if not self.positions:
-            return pd.DataFrame(
-                columns=[
-                    "ticker", "shares", "avg_cost", "market_price",
-                    "market_value", "unrealized_pnl", "unrealized_pct",
-                ]
-            )
+            return pd.DataFrame(columns=columns)
         rows = []
         for p in self.positions:
             rows.append(
@@ -139,6 +158,7 @@ class IBSnapshot:
                     "avg_cost": p.avg_cost,
                     "market_price": p.market_price,
                     "market_value": p.market_value,
+                    "daily_pnl": p.daily_pnl,
                     "unrealized_pnl": p.unrealized_pnl,
                     "unrealized_pct": (
                         (p.market_price / p.avg_cost - 1.0)
@@ -167,6 +187,22 @@ class IBSnapshot:
 # Connection helper
 # ────────────────────────────────────────────────────────────────
 
+def _ensure_event_loop() -> None:
+    """Give the current thread an asyncio event loop.
+
+    ``ib_insync`` is built on asyncio; Streamlit runs each user session in
+    a worker thread that has no default event loop, which raises
+    ``RuntimeError: There is no current event loop in thread ...`` on the
+    very first ``IB()`` call. Same story for Jupyter, cron under nohup,
+    and any non-main-thread caller. Creating one and installing it as the
+    thread's default is safe and idempotent.
+    """
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+
 def connect_read_only(
     host: str = DEFAULT_IB_HOST,
     port: int = DEFAULT_IB_PORT,
@@ -187,6 +223,7 @@ def connect_read_only(
     Raises:
         RuntimeError: If the connection fails or reports not connected.
     """
+    _ensure_event_loop()
     from ib_insync import IB
 
     ib = IB()
@@ -210,7 +247,14 @@ _USD_ACCOUNT_SUMMARY_TAGS = (
     "GrossPositionValue",
     "RealizedPnL",
     "UnrealizedPnL",
+    "ExcessLiquidity",
+    "AvailableFunds",
+    "MaintMarginReq",
+    "InitMarginReq",
 )
+
+_PNL_SETTLE_SECONDS = 2  # How long to wait for streaming reqPnL updates.
+_IB_UNSET_SENTINEL = -1.7976931348623157e+308  # IB's "no value" magic number.
 
 
 def _safe_float(value: object) -> float:
@@ -221,6 +265,26 @@ def _safe_float(value: object) -> float:
         return float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return 0.0
+
+
+def _safe_pnl(value: object) -> float:
+    """Coerce a streaming-PnL value, treating IB's sentinel + NaN as NaN.
+
+    ib_insync surfaces "no value yet" as either NaN, None, or IB's magic
+    -1.797e308. The applet treats all three as NaN so the UI can render
+    a blank rather than a spurious 0.
+    """
+    if value is None:
+        return float("nan")
+    try:
+        f = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return float("nan")
+    if f != f:  # NaN
+        return float("nan")
+    if f == _IB_UNSET_SENTINEL:
+        return float("nan")
+    return f
 
 
 def fetch_snapshot(ib: "IB") -> IBSnapshot:
@@ -245,7 +309,14 @@ def fetch_snapshot(ib: "IB") -> IBSnapshot:
         if av.currency == "USD" and av.tag in summary_by_tag:
             summary_by_tag[av.tag] = _safe_float(av.value)
 
-    positions = tuple(_extract_positions(ib))
+    positions_raw = _extract_positions(ib)
+    daily_pnl_by_conid, account_daily_pnl = _fetch_daily_pnl(
+        ib, account, positions_raw
+    )
+    positions = tuple(
+        Position(**{**p, "daily_pnl": daily_pnl_by_conid.get(p["conid"], float("nan"))})
+        for p in positions_raw
+    )
     open_orders = tuple(_extract_open_orders(ib))
 
     return IBSnapshot(
@@ -257,52 +328,122 @@ def fetch_snapshot(ib: "IB") -> IBSnapshot:
         gross_position_value=summary_by_tag["GrossPositionValue"],
         realized_pnl_reported=summary_by_tag["RealizedPnL"],
         unrealized_pnl_reported=summary_by_tag["UnrealizedPnL"],
+        daily_pnl=account_daily_pnl,
+        excess_liquidity=summary_by_tag["ExcessLiquidity"],
+        available_funds=summary_by_tag["AvailableFunds"],
+        maint_margin=summary_by_tag["MaintMarginReq"],
+        init_margin=summary_by_tag["InitMarginReq"],
         positions=positions,
         open_orders=open_orders,
     )
 
 
-def _extract_positions(ib: "IB") -> list[Position]:
-    """Use ib.portfolio() so we get marketPrice + unrealized PnL for free.
+def _extract_positions(ib: "IB") -> list[dict]:
+    """Return raw dicts (missing ``daily_pnl``) so the caller can attach
+    per-position PnL from the streaming ``reqPnLSingle`` call.
 
-    Falls back to ib.positions() (no market data) if portfolio() is empty.
+    Uses ``ib.portfolio()`` so we get marketPrice + unrealized PnL for
+    free; falls back to ``ib.positions()`` (no market data) if empty.
     """
     items = ib.portfolio()
     if items:
-        out: list[Position] = []
+        out: list[dict] = []
         for it in items:
             shares = float(it.position)
             if shares == 0:
                 continue
             out.append(
-                Position(
-                    ticker=it.contract.symbol,
-                    shares=shares,
-                    avg_cost=float(it.averageCost),
-                    market_price=float(it.marketPrice),
-                    market_value=float(it.marketValue),
-                    unrealized_pnl=float(it.unrealizedPNL),
-                )
+                {
+                    "ticker": it.contract.symbol,
+                    "conid": int(getattr(it.contract, "conId", 0) or 0),
+                    "shares": shares,
+                    "avg_cost": float(it.averageCost),
+                    "market_price": float(it.marketPrice),
+                    "market_value": float(it.marketValue),
+                    "unrealized_pnl": float(it.unrealizedPNL),
+                }
             )
         return out
 
-    out: list[Position] = []
+    out = []
     for p in ib.positions():
         shares = float(p.position)
         if shares == 0:
             continue
         avg_cost = float(p.avgCost)
         out.append(
-            Position(
-                ticker=p.contract.symbol,
-                shares=shares,
-                avg_cost=avg_cost,
-                market_price=avg_cost,  # No market data source available
-                market_value=shares * avg_cost,
-                unrealized_pnl=0.0,
-            )
+            {
+                "ticker": p.contract.symbol,
+                "conid": int(getattr(p.contract, "conId", 0) or 0),
+                "shares": shares,
+                "avg_cost": avg_cost,
+                "market_price": avg_cost,  # No market data source available
+                "market_value": shares * avg_cost,
+                "unrealized_pnl": 0.0,
+            }
         )
     return out
+
+
+def _fetch_daily_pnl(
+    ib: "IB",
+    account: str,
+    positions_raw: list[dict],
+) -> tuple[dict[int, float], float]:
+    """Batch-subscribe to reqPnL + reqPnLSingle, wait once, then cancel.
+
+    Returns ``(daily_pnl_by_conid, account_daily_pnl)``.
+
+    Values that IB hasn't populated within ``_PNL_SETTLE_SECONDS`` are
+    returned as ``float('nan')`` so the UI can render a blank cell.
+
+    Failures at any layer (rate limits, network, IB not exposing PnL for
+    this account type) degrade gracefully to all-NaN. Snapshot is still
+    returned; the applet doesn't crash because PnL isn't available.
+    """
+    account_pnl = None
+    single_subs: list[tuple[int, object]] = []
+
+    try:
+        account_pnl = ib.reqPnL(account)
+    except Exception:  # noqa: BLE001
+        logger.warning("reqPnL failed for %s — daily P&L will be NaN", account)
+
+    for p in positions_raw:
+        conid = p.get("conid") or 0
+        if conid <= 0:
+            continue
+        try:
+            sub = ib.reqPnLSingle(account, "", conid)
+            single_subs.append((conid, sub))
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "reqPnLSingle failed for %s (conid=%s)", p.get("ticker"), conid
+            )
+
+    if account_pnl is not None or single_subs:
+        try:
+            ib.sleep(_PNL_SETTLE_SECONDS)
+        except Exception:  # noqa: BLE001
+            logger.warning("ib.sleep interrupted while waiting for PnL")
+
+    account_daily = float("nan")
+    if account_pnl is not None:
+        account_daily = _safe_pnl(getattr(account_pnl, "dailyPnL", None))
+        try:
+            ib.cancelPnL(account)
+        except Exception:  # noqa: BLE001
+            pass
+
+    daily_by_conid: dict[int, float] = {}
+    for conid, sub in single_subs:
+        daily_by_conid[conid] = _safe_pnl(getattr(sub, "dailyPnL", None))
+        try:
+            ib.cancelPnLSingle(account, "", conid)
+        except Exception:  # noqa: BLE001
+            pass
+
+    return daily_by_conid, account_daily
 
 
 def _extract_open_orders(ib: "IB") -> list[OpenOrder]:
