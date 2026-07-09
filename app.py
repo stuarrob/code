@@ -344,17 +344,48 @@ with tab_collect:
     if st.button("Load / refresh price matrix", type="primary"):
         # Optional IB refresh first.
         if refresh_from_ib:
+            import time as _time
+
             work = (status or {}).get("n_stale", 0) + (status or {}).get("n_missing", 0)
+            # IB rate-limit safe interval is 12s/request; back-of-envelope
+            # ETA is 12s * work, but the collector spends ~1s of that on
+            # bookkeeping so real-world tends to be ~13-14s.
+            est_seconds = work * 13
+            est_finish = pd.Timestamp.now() + pd.Timedelta(seconds=est_seconds)
+            hrs, rem = divmod(est_seconds, 3600)
+            mins = rem // 60
+            st.info(
+                f"Refreshing **{work:,} tickers** — estimated **{int(hrs)}h "
+                f"{int(mins)}m**, done around **{est_finish:%H:%M}** "
+                f"(local time). You can leave this browser tab open; the "
+                f"process runs server-side and picks back up if the "
+                f"connection is stable."
+            )
             with st.status(
                 f"Refreshing {work} tickers from IB Gateway…",
                 expanded=True,
             ) as status_box:
                 progress = st.progress(0.0)
                 progress_label = st.empty()
+                _t0 = _time.monotonic()
 
                 def _cb(i: int, total: int, ticker: str):
                     progress.progress(min(i / max(total, 1), 1.0))
-                    progress_label.markdown(f"`{i}/{total}` — {ticker}")
+                    elapsed = _time.monotonic() - _t0
+                    if i > 0:
+                        per = elapsed / i
+                        remaining_secs = per * (total - i)
+                        eta_h, r = divmod(int(remaining_secs), 3600)
+                        eta_m, _ = divmod(r, 60)
+                        eta_txt = (
+                            f"ETA {eta_h}h {eta_m:02d}m"
+                            if eta_h else f"ETA {eta_m}m"
+                        )
+                    else:
+                        eta_txt = "warming up…"
+                    progress_label.markdown(
+                        f"`{i:,}/{total:,}` · {ticker} · {eta_txt}"
+                    )
 
                 try:
                     result = refresh_prices_from_ib(
