@@ -501,6 +501,68 @@ All factors are normalized to [0,1] via percentile ranking before integration. E
 
 \textbf{Why geometric mean:} The geometric mean penalises ETFs with weakness on any single factor. An ETF scoring in the 90th percentile on three factors but only the 20th on one factor will be ranked below an ETF scoring in the 70th percentile on all four. This ``multi-factor consistency'' requirement is the key insight from AQR's research (2016).
 
+\subsection{Justification of the Weight Vector 35/30/20/15}
+\label{sec:weight_justification}
+
+The weights momentum $=$ 35\%, quality $=$ 30\%, volatility $=$ 20\%, value $=$ 15\% are an \emph{informed prior}, not an in-sample optimum. This subsection records the reasoning explicitly following the July~2026 recalibration review (\texttt{docs/research/2026-07\_factor\_weight\_diagnostic.md}).
+
+\subsubsection{The empirical diagnostic and why we did not act on it}
+
+A level-1 grid search over the three-factor simplex (momentum, quality, volatility; value excluded because it is proxied only by expense ratio and carries no meaningful time-series signal) was run on the cached ETF universe from 2021-04-12 to 2026-04-16, monthly rebalance, top-20 by integrated rank, exponential weights, 5~bps turnover cost. The in-sample winners across both a 5-year and a 3-year window were uniformly \emph{momentum-heavy}: 80--90\% momentum, 0--30\% quality, 10--20\% low-volatility. Sharpe ratios reached 1.30 on the 3-year slice compared with $\approx$0.96 for the current 35/30/20/15 policy.
+
+\textbf{We deliberately declined to update the policy on this evidence.} The 2021--2026 window was overwhelmingly a single momentum-friendly regime (post-COVID rally, mega-cap technology concentration, AI narrative from 2023 onward). Both the full and 3-year windows overlap and sample the same regime; this is not an independent invariance test. Adopting the mechanical in-sample winner (90\% momentum, 0\% quality, 10\% low-vol) would be an act of confirmation bias, not calibration --- exactly the exposure the operator is on record as most concerned about (a potential unwinding of the AI/tech valuation regime).
+
+\subsubsection{The ergodicity argument for insurance-premium factors}
+
+The stronger justification for retaining quality and low-volatility weights is that equity returns are \emph{multiplicative and non-ergodic}. Following Peters (2019) and the ergodicity-economics literature, for a single investor on a single path the arithmetic mean of returns diverges from the time-average growth rate that they actually experience. By Jensen's inequality, since $\log(\cdot)$ is concave:
+
+\begin{equation}
+\underbrace{\mathbb{E}[\log(1+r)]}_{\text{time-average growth rate}} < \underbrace{\log(1 + \mathbb{E}[r])}_{\text{arithmetic-mean growth}}
+\end{equation}
+
+The gap --- the ``ergodicity premium'' --- is lost whenever the strategy is optimised against arithmetic expected return. This has two direct consequences for factor-weight selection:
+
+\begin{enumerate}[noitemsep]
+    \item \textbf{Drawdown asymmetry.} A 50\% drawdown requires a 100\% subsequent gain to break even, not a 50\% one. Arithmetic-mean Sharpe optimisation understates this. Factors that reduce drawdown variance (quality, low-volatility) buy protection against exactly the multiplicative losses that a single-path investor most needs to avoid.
+    \item \textbf{Long-window Capital Market Assumption critique.} A 50-year CMA of ``US equities return 7\% real'' presumes ergodicity --- that averaging over many parallel investors or a long horizon converges to a well-defined distribution. It does not. Any given investor experiences one path, and the arithmetic prior overstates what they will earn. Long-window calibration exercises therefore \emph{cannot} be treated as sufficient basis for weight-vector selection in a live-money system; the ensemble picture is not the individual-path picture.
+\end{enumerate}
+
+The 30\% quality and 20\% low-volatility allocations in the current policy are, under this reading, \textbf{insurance premia against non-ergodic tail losses, not underperforming factors}. In-sample they read as drag on Sharpe. On the actual path the investor walks they may be the reason the strategy survives to compound. This is precisely the Kelly / log-utility argument (Kelly, 1956; Thorp, 2006) applied to factor construction.
+
+\subsubsection{The Bayesian-prior critique}
+
+A parallel objection to long-window optimisation is that Bayesian methods with human-elicited priors are systematically prone to salience, recency, and narrative bias. A prior distribution shaped by a decade of momentum-factor success will ``know'' momentum works; that is not knowledge, it is regime-embedded belief. This is a second reason to refuse to let a five-year in-sample winner override an informed prior --- the numerical evidence and the elicited prior are contaminated by the same regime.
+
+\subsubsection{Why these specific integer values}
+
+The specific magnitudes 35/30/20/15 are not derived from a proven optimum. They are chosen to satisfy three constraints:
+
+\begin{enumerate}[noitemsep]
+    \item \textbf{Momentum $>$ quality $>$ volatility $>$ value.} Reflects the ordering of empirical premia in the AQR literature (Jegadeesh \& Titman, 1993; Asness, Frazzini \& Pedersen, 2019; Baker, Bradley \& Wurgler, 2011) and the compounded issue that the value factor here is proxied only by expense ratio.
+    \item \textbf{No factor at or below 10\%.} A factor below 10\% receives such a small weight in the weighted geometric mean that it fails to discriminate between candidates; the multi-factor consistency requirement collapses to a three-factor screen.
+    \item \textbf{No factor above 40\%.} A factor above 40\% dominates the integrated score to the point that a single-factor selection would produce nearly the same portfolio. This defeats the multi-factor rationale and re-introduces single-factor tail risk.
+\end{enumerate}
+
+Within those constraints, the round-number allocation is a Schelling point that can be explained in a sentence to a future maintainer or auditor. It is deliberately regularised away from an in-sample optimum.
+
+\subsubsection{When to revise}
+
+The policy weights will be revisited when at least one of the following is available:
+
+\begin{enumerate}[noitemsep]
+    \item \textbf{Backfilled history through pre-2020} that permits a non-overlapping regime comparison (2011--2015 vs 2021--2026 is the immediate target).
+    \item \textbf{A working value factor} using fundamental data (P/E, P/B, dividend yield) rather than expense ratio.
+    \item \textbf{A deliberate factor-level sentiment override} --- a documented, time-stamped, committed edit to \texttt{configs/etf\_smart\_beta.toml} reflecting a macro view (e.g. a downweighting of momentum during a period the operator judges to be a valuation-driven late-cycle regime). Such overrides are the operator's discretionary layer above the systematic core, and are logged in git rather than automated.
+\end{enumerate}
+
+\textbf{References for this subsection:}
+\begin{itemize}[noitemsep]
+    \item Peters, O. (2019). ``The ergodicity problem in economics.'' \emph{Nature Physics}, 15, 1216--1221.
+    \item Kelly, J. L. (1956). ``A new interpretation of information rate.'' \emph{Bell System Technical Journal}, 35(4), 917--926.
+    \item Thorp, E. O. (2006). ``The Kelly criterion in blackjack, sports betting, and the stock market.'' \emph{Handbook of Asset and Liability Management}, 1, 385--428.
+    \item Taleb, N. N. (2018). \emph{Skin in the Game}. Random House. --- Chapter on ergodicity and ensemble vs time probability.
+\end{itemize}
+
 %% ============================================================
 \section{Portfolio Construction}
 %% ============================================================
