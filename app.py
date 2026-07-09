@@ -19,6 +19,16 @@ from __future__ import annotations
 
 import streamlit as st
 
+from src.portfolio.ib_state import (
+    DEFAULT_IB_CLIENT_ID,
+    DEFAULT_IB_HOST,
+    DEFAULT_IB_PORT,
+    DEFAULT_NAV_HISTORY_PATH,
+    append_nav_snapshot,
+    connect_read_only,
+    fetch_snapshot,
+    load_nav_history,
+)
 from src.portfolio.policy import DEFAULT_POLICY_PATH, load_policy
 
 
@@ -130,19 +140,124 @@ tab_setup, tab_collect, tab_optimize, tab_propose, tab_explain, tab_send, tab_su
 
 
 with tab_setup:
-    st.header("Step 1 — set the cash budget")
+    st.header("Step 1 — cash budget + live IBKR snapshot")
     st.markdown(
         "Enter the amount of **additional** cash you want to deploy on top of "
-        "the current portfolio. Leave at `0` to run a pure rebalance."
+        "the current portfolio. Leave at `0` to run a pure rebalance. Then "
+        "pull a **read-only** snapshot of your live IB account below."
     )
-    st.number_input(
-        "Additional cash (USD)",
-        min_value=0.0,
-        step=1000.0,
-        format="%.0f",
-        key="cash_budget",
-    )
-    st.info("Wired next slice: live IBKR read-only snapshot (NAV / cash / positions).")
+
+    cash_col, ib_col = st.columns([1, 2])
+    with cash_col:
+        st.number_input(
+            "Additional cash (USD)",
+            min_value=0.0,
+            step=1000.0,
+            format="%.0f",
+            key="cash_budget",
+        )
+
+    with ib_col:
+        st.markdown("**IB Gateway (read-only)**")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            ib_host = st.text_input("Host", value=DEFAULT_IB_HOST)
+        with c2:
+            ib_port = st.number_input(
+                "Port", value=DEFAULT_IB_PORT, step=1, format="%d",
+                help="4001 live, 4002 paper",
+            )
+        with c3:
+            ib_client_id = st.number_input(
+                "Client ID", value=DEFAULT_IB_CLIENT_ID, step=1, format="%d",
+                help="Applet reserves 30; script defaults use 1/2/5/15/22.",
+            )
+
+        if st.button("Pull snapshot", type="primary"):
+            with st.spinner("Connecting to IB Gateway..."):
+                try:
+                    ib = connect_read_only(
+                        host=ib_host,
+                        port=int(ib_port),
+                        client_id=int(ib_client_id),
+                    )
+                    snap = fetch_snapshot(ib)
+                    ib.disconnect()
+                    st.session_state["ib_snapshot"] = snap
+                    hist = append_nav_snapshot(snap)
+                    st.session_state["nav_history"] = hist
+                    st.success(
+                        f"Connected to {snap.account} — "
+                        f"{len(snap.positions)} positions, "
+                        f"{len(snap.open_orders)} open orders."
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    st.session_state["ib_snapshot"] = None
+                    st.error(f"IB connection failed: {exc}")
+
+    snap = st.session_state.get("ib_snapshot")
+    if snap is not None:
+        st.divider()
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("NAV", f"${snap.nav:,.0f}")
+        m2.metric("Cash", f"${snap.cash:,.0f}")
+        m3.metric("Buying Power", f"${snap.buying_power:,.0f}")
+        m4.metric("Unrealized P&L", f"${snap.unrealized_pnl_reported:,.0f}")
+        m5.metric("Realized P&L", f"${snap.realized_pnl_reported:,.0f}")
+        st.caption(
+            f"Account **{snap.account}** · "
+            f"Snapshot at {snap.timestamp:%Y-%m-%d %H:%M:%S %Z} · "
+            f"P&L values are as reported by IB `accountSummary` "
+            f"(labelling may reflect day/YTD depending on IB config)."
+        )
+
+        st.subheader("Equity curve (local snapshots)")
+        hist = st.session_state.get("nav_history")
+        if hist is None:
+            hist = load_nav_history()
+        if hist.empty or len(hist) < 2:
+            st.caption(
+                f"Only {len(hist)} snapshot(s) so far — the curve will build "
+                f"as you run the applet on subsequent days. Stored at "
+                f"`{DEFAULT_NAV_HISTORY_PATH}`."
+            )
+        else:
+            st.line_chart(hist[["nav", "cash"]])
+
+        pos_col, ord_col = st.columns(2)
+        with pos_col:
+            st.subheader(f"Positions ({len(snap.positions)})")
+            st.dataframe(
+                snap.positions_df(),
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "avg_cost": st.column_config.NumberColumn(format="$%.2f"),
+                    "market_price": st.column_config.NumberColumn(format="$%.2f"),
+                    "market_value": st.column_config.NumberColumn(format="$%.0f"),
+                    "unrealized_pnl": st.column_config.NumberColumn(format="$%.0f"),
+                    "unrealized_pct": st.column_config.NumberColumn(format="%.2f%%"),
+                },
+            )
+        with ord_col:
+            st.subheader(f"Open orders ({len(snap.open_orders)})")
+            n_trails = len(snap.open_trails)
+            if n_trails:
+                st.caption(
+                    f"🛡️ {n_trails} protective TRAIL(s) already in place — "
+                    f"the Propose panel will layer new TRAILs only on **new** shares."
+                )
+            st.dataframe(
+                snap.orders_df(),
+                hide_index=True,
+                use_container_width=True,
+            )
+    else:
+        st.info(
+            "Snapshot not yet loaded. Make sure IB Gateway is running and "
+            "**Read-Only API is on** (Global Config → API → Settings), then "
+            "click *Pull snapshot*."
+        )
 
 
 with tab_collect:
