@@ -320,16 +320,38 @@ def refresh_prices_from_ib(
 
 
 def _resolve_cached_prices(processed_dir: Path) -> Path:
+    """Return whichever cached parquet has the newest last bar.
+
+    Historically the priority was db -> ib -> yfinance, but that's wrong
+    when the daily cron writes IB parquets and the Databento parquet is
+    a stale snapshot. Picking by freshness means whichever collector
+    ran most recently wins, without hard-coding an ordering.
+    """
+    candidates: list[tuple[pd.Timestamp, Path]] = []
     for filename in _PROCESSED_FILENAMES:
         candidate = processed_dir / filename
-        if candidate.exists():
-            logger.info("Loading prices from %s", candidate.name)
-            return candidate
-    tried = ", ".join(_PROCESSED_FILENAMES)
-    raise FileNotFoundError(
-        f"No cached ETF price parquet under {processed_dir!s} "
-        f"(tried: {tried}). Run scripts/daily_etf_data.py or the daily cron."
+        if not candidate.exists():
+            continue
+        try:
+            end_date = pd.read_parquet(candidate, columns=[]).index.max()
+        except Exception:  # noqa: BLE001 — unreadable ≈ skip
+            continue
+        if pd.isna(end_date):
+            continue
+        candidates.append((pd.Timestamp(end_date), candidate))
+    if not candidates:
+        tried = ", ".join(_PROCESSED_FILENAMES)
+        raise FileNotFoundError(
+            f"No cached ETF price parquet under {processed_dir!s} "
+            f"(tried: {tried}). Run scripts/daily_etf_data.py or the "
+            f"'Refresh from IB' option in the Collect tab."
+        )
+    candidates.sort(key=lambda pair: pair[0], reverse=True)
+    winner_date, winner_path = candidates[0]
+    logger.info(
+        "Loading prices from %s (last bar %s)", winner_path.name, winner_date.date()
     )
+    return winner_path
 
 
 def _apply_quality_filter(

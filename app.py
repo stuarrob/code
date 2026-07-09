@@ -399,7 +399,8 @@ with tab_collect:
         c2.metric("Trading days", len(load.prices))
         c3.metric("Start", f"{load.start_date:%Y-%m-%d}")
         c4.metric("End", f"{load.end_date:%Y-%m-%d}")
-        age_days = (pd.Timestamp.utcnow().normalize() - load.end_date.normalize()).days
+        # Both tz-naive; end_date comes from the parquet index (also tz-naive).
+        age_days = (pd.Timestamp.now().normalize() - load.end_date.normalize()).days
         if age_days > 3:
             st.warning(
                 f"Latest bar in loaded matrix is {age_days} days old — tick "
