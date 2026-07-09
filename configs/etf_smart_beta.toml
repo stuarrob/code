@@ -1,0 +1,48 @@
+# ETF smart-beta policy — single source of truth for the portfolio applet.
+#
+# Loaded by `src.portfolio.policy.load_policy()`; the applet displays these
+# values and the deterministic pipeline consumes them. To change a knob:
+# edit here, restart the applet, review the proposal.
+#
+# Values below match what was previously scattered across s3_factors.py,
+# s6_trades.py, s7_execute.py, ib_update_and_recommend.py, ib_portfolio_manager.py,
+# manage_stop_loss_portfolio.py, and .env.example.
+
+[meta]
+name = "aqr-multifactor-etf-2026"
+version = 1
+tax_status = "taxable"  # taxable | tax_advantaged | retirement
+
+[portfolio]
+num_positions = 20
+min_weight = 0.02  # 2% floor per position
+max_weight = 0.15  # 15% ceiling per position
+
+[factor_weights]
+# Must sum to 1.0 (enforced by the loader with 1e-3 tolerance).
+momentum = 0.35
+quality = 0.30
+value = 0.15
+volatility = 0.20
+
+[factor_lookbacks]
+# Trading-day windows. AQR convention: 12-month momentum minus 1-month reversal.
+momentum = 252
+momentum_skip_recent = 21
+quality = 252
+value = 252
+volatility = 60
+
+[rebalance]
+frequency = "bimonthly"  # weekly | monthly | bimonthly | quarterly
+drift_threshold = 0.05   # Rebalance when any weight drifts > 5% from target.
+
+[risk]
+entry_stop_loss_pct = 0.12  # Fixed stop 12% below entry.
+trailing_stop_pct = 0.10    # Trailing stop 10% below the high-water mark.
+cash_reserve = 70000        # USD kept unallocated at all times.
+
+[optimizer]
+risk_aversion = 1.5       # Mean-variance risk-aversion coefficient.
+robustness_penalty = 0.7  # Axioma robustness weight.
+turnover_penalty = 0.2    # Penalty on portfolio turnover.
