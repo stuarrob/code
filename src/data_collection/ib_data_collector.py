@@ -74,24 +74,45 @@ class IBDataCollector:
     ) -> Tuple[List[Stock], List[str]]:
         """Qualify contracts on IB in batches.
 
+        ``ib.qualifyContracts`` accepts multiple contracts and dispatches
+        them concurrently, so a batch of 50 costs one round-trip rather
+        than 50. On a full universe (~5000 tickers) this shortens the
+        pre-download phase from ~100 minutes to a few minutes.
+
+        Delisted / unknown tickers surface as contracts with ``conId == 0``
+        after the call returns; they're routed into ``failed``. A batch
+        that raises (rare — IB usually reports errors per-contract via
+        the event system) is retried one-by-one so a single bad ticker
+        does not lose the whole batch.
+
         Returns (qualified_contracts, failed_tickers).
         """
         qualified = []
         failed = []
 
         for i in range(0, len(tickers), batch_size):
-            batch = tickers[i : i + batch_size]
-            for t in batch:
-                c = Stock(t, "SMART", "USD")
-                try:
-                    self.ib.qualifyContracts(c)
-                    if c.conId:
-                        qualified.append(c)
-                    else:
-                        failed.append(t)
-                except Exception:
+            batch_tickers = tickers[i : i + batch_size]
+            contracts = [Stock(t, "SMART", "USD") for t in batch_tickers]
+
+            try:
+                self.ib.qualifyContracts(*contracts)
+            except Exception:
+                # Fall back to per-contract qualification so one bad
+                # symbol doesn't lose the whole batch.
+                for t, c in zip(batch_tickers, contracts):
+                    try:
+                        self.ib.qualifyContracts(c)
+                    except Exception:
+                        pass
+
+            for t, c in zip(batch_tickers, contracts):
+                if c.conId:
+                    qualified.append(c)
+                else:
                     failed.append(t)
-            self.ib.sleep(0.5)
+
+            # Small breather so we don't machine-gun the API between batches.
+            self.ib.sleep(0.2)
 
             done = min(i + batch_size, len(tickers))
             if done % 200 == 0 or done == len(tickers):
