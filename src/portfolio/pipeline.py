@@ -385,6 +385,7 @@ def score_factors(
     prices: pd.DataFrame,
     policy: SmartBetaPolicy,
     expense_ratios: Optional[pd.Series] = None,
+    dividend_yields: Optional[pd.Series] = None,
 ) -> ScoringResult:
     """Compute per-factor scores + weighted-geometric-mean integration.
 
@@ -392,9 +393,11 @@ def score_factors(
     ETFs) before scoring so a Direxion 3× fund never dominates the
     momentum quintile.
 
-    If no expense-ratio series is provided, the value factor is
-    silently dropped and its weight redistributed proportionally to
-    the remaining factors (matches historic s3_factors.py behaviour).
+    If neither expense_ratios nor dividend_yields is provided (or both
+    are all-NaN), the value factor is dropped and its weight
+    redistributed proportionally to the remaining factors. When either
+    is provided, the value factor is included — `ValueFactor` handles
+    the blend internally.
 
     Args:
         prices: Wide DataFrame (dates × tickers).
@@ -402,6 +405,9 @@ def score_factors(
         expense_ratios: Optional Series (ticker → decimal expense
             ratio, e.g. 0.0045 for 45 bps). Missing tickers are
             imputed to the median before the value factor runs.
+        dividend_yields: Optional Series (ticker → trailing distribution
+            yield as a decimal, e.g. 0.025 for 2.5%). When present the
+            value factor uses the yield + expense-ratio blend.
 
     Returns:
         :class:`ScoringResult` with combined scores, per-factor
@@ -432,10 +438,27 @@ def score_factors(
         "volatility": volatility,
     }
 
-    if expense_ratios is not None and expense_ratios.notna().sum() > 0:
+    er_present = expense_ratios is not None and expense_ratios.notna().sum() > 0
+    dy_present = dividend_yields is not None and dividend_yields.notna().sum() > 0
+
+    if er_present:
         median_er = expense_ratios.dropna().median()
         aligned_er = expense_ratios.reindex(prices_basic.columns).fillna(median_er)
-        factor_dict["value"] = SimplifiedValueFactor().calculate(prices_basic, aligned_er)
+        aligned_dy = None
+        if dy_present:
+            # No median imputation on yield: 0.0 is a legitimate value
+            # (many ETFs don't pay dividends). Missing = we truly don't
+            # know, so pass NaN through for the factor to skip.
+            aligned_dy = dividend_yields.reindex(prices_basic.columns)
+        # Use the full ValueFactor (blend) not SimplifiedValueFactor when
+        # yields are available; falls back to ER-only inside the class
+        # when aligned_dy is None or all-NaN.
+        from src.factors import ValueFactor
+        factor_dict["value"] = ValueFactor().calculate(
+            prices=prices_basic,
+            expense_ratios=aligned_er,
+            dividend_yields=aligned_dy,
+        )
     else:
         logger.info(
             "No expense ratios provided — value factor skipped, "

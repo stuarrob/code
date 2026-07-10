@@ -461,6 +461,27 @@ def load_cache(path: Path = DEFAULT_CACHE_PATH) -> Optional[pd.DataFrame]:
     return pd.read_parquet(path)
 
 
+def load_fundamentals_series(
+    path: Path = DEFAULT_CACHE_PATH,
+) -> tuple[Optional[pd.Series], Optional[pd.Series]]:
+    """Return (expense_ratios, dividend_yields) as ticker-indexed Series.
+
+    Convenience for the value factor pipeline: reads the parquet, sets
+    `ticker` as the index, and returns the two columns the factor needs.
+
+    Returns (None, None) if the cache does not exist. Individual series
+    are still returned even if the underlying columns are all-NaN — the
+    factor code handles emptiness itself.
+    """
+    df = load_cache(path)
+    if df is None or df.empty:
+        return None, None
+    df = df.set_index("ticker")
+    er = df["expense_ratio"] if "expense_ratio" in df.columns else None
+    dy = df["dividend_yield"] if "dividend_yield" in df.columns else None
+    return er, dy
+
+
 def save_cache(df: pd.DataFrame, path: Path = DEFAULT_CACHE_PATH) -> None:
     """Persist fundamentals with a fetch-timestamp column added.
 

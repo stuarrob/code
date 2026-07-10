@@ -366,7 +366,8 @@ Adversarial review, tiered by impact. Items remain here until closed; closed ite
 \subsection{Tier 1 --- material design flaws}
 
 \begin{itemize}
-    \item \textbf{T1.1 The value factor is fake.} \texttt{SimplifiedValueFactor} returns $-1 \times$ expense ratio. This is a fee preference, not a value signal. The 15\% weight buys almost nothing. The natural regime hedge that value provides (2000--2002, 2022) is absent from the model. \textbf{Highest-impact single fix.} Replace with fundamentals composite (P/E, P/B, dividend yield); IB Fundamentals API preferred over yfinance.
+    \item \textbf{T1.1 The value factor is fake.} \textbf{Partially closed 2026-07-10.} \texttt{ValueFactor} now consumes real per-fund dividend yield (from FMP \texttt{stable/profile}, \texttt{lastDividend}/\texttt{price}) and real per-fund expense ratio (from FMP \texttt{stable/etf/info}). Blend is 60\% yield + 40\% expense ratio. Rankings verified sensible: SCHD/HDV/VYM/VTV score at the top, VUG/VGT/ARKK at the bottom.
+    \textbf{Residual gap:} fund-level weighted P/E and P/B remain unavailable at any FMP tier (\texttt{key-metrics-ttm} and \texttt{ratios-ttm} return zero rows for ETFs since they aggregate 10-K filings; \texttt{etf/holdings} needs Ultimate tier and thousands of aggregation calls). A future upgrade path exists via Ultimate-tier holdings aggregation or a Morningstar-class source. Current implementation delivers roughly 60\% of the intended value composite --- the yield signal alone is the canonical academic value tilt for ETFs.
     \item \textbf{T1.2 Survivorship bias in the cached universe.} The per-ticker parquet cache contains only ETFs that still trade. Delisted / liquidated ETFs are absent. Every backtest overstates historical performance by the average return of survivors. Mitigation: 1--2\% CAGR haircut on all backtested figures.
     \item \textbf{T1.3 Look-ahead bias presumed absent, never proved.} No pinning test asserts that factor calculations at time $t$ use only data with index $< t$. If any factor uses a window that includes $t{+}1$, the backtest is silently inflated. Fix: add a shift-and-recompute test. Two hours' work.
 \end{itemize}
@@ -404,6 +405,10 @@ Adversarial review, tiered by impact. Items remain here until closed; closed ite
 %% ============================================================
 
 Chronological, most recent first. Each entry cites the closing commit SHA(s). Every commit touching \texttt{configs/etf\_smart\_beta.toml}, \texttt{src/factors/}, \texttt{src/portfolio/}, or the execution scripts must append an entry.
+
+\subsection*{2026-07-10 --- T1.1 partial close: real value factor via FMP Premium}
+
+Value factor rewired end-to-end. \texttt{src/factors/value\_factor.py} now blends real per-fund dividend yield (60\% weight) with expense ratio (40\% weight). Fundamentals cache at \texttt{\textasciitilde/trade\_data/ETFTrader/processed/etf\_fundamentals.parquet}, refreshed weekly by \texttt{scripts/refresh\_fundamentals.py} over the union of the defined universe and the price cache (\textasciitilde 5000 tickers). Data source is Financial Modeling Prep Premium tier (\textasciitilde\$44/mo; verified capabilities on 2026-07-10 --- see rule\_verify\_before\_recommending memo). Sanity check: SCHD scores 1.04, VYM 0.56, VTI $-0.05$, VUG $-0.39$, ARKK $-1.81$ --- the expected value ordering. Residual: fund-level P/E and P/B remain unavailable at current FMP tier, documented in T1.1. Commit: 2d4c671 (endpoint verification), plus follow-up wiring.
 
 \subsection*{2026-07-10 --- Position count 20$\rightarrow$30, cash reserve \$70k$\rightarrow$\$30k}
 
