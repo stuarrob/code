@@ -53,6 +53,7 @@ from src.portfolio.explain import (
     narrate_proposal,
     narrate_with_claude,
 )
+from src.data_collection.issuer_fundamentals import load_fundamentals_series
 
 DEFAULT_PROCESSED_DIR = Path.home() / "trade_data" / "ETFTrader" / "processed"
 
@@ -563,7 +564,17 @@ with tab_optimize:
         if st.button("Score + optimise", type="primary"):
             with st.spinner("Scoring factors + running optimiser…"):
                 try:
-                    scoring = score_factors(load.prices, policy)
+                    # Load fundamentals cache so ValueFactor gets real data
+                    # (yield + expense ratio blend). If the cache is missing
+                    # or empty the value factor silently drops with its
+                    # weight redistributed — but that's the whole point of
+                    # T1.1, so surface it as a warning below.
+                    expense_ratios, dividend_yields = load_fundamentals_series()
+                    scoring = score_factors(
+                        load.prices, policy,
+                        expense_ratios=expense_ratios,
+                        dividend_yields=dividend_yields,
+                    )
                     weights = optimize_portfolio(
                         scoring, load.prices, policy, optimizer_type=optimizer_type,
                     )
