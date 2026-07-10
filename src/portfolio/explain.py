@@ -43,7 +43,7 @@ from src.portfolio.proposal import (
 )
 
 
-DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-7"  # highest quality; ~5x Sonnet cost, trivial on live NAV
+DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-8"  # verified via API probe 2026-07-10; latest Opus
 
 
 # ────────────────────────────────────────────────────────────────
