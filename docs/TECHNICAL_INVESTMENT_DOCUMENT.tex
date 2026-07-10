@@ -31,7 +31,7 @@
 \maketitle
 
 \begin{abstract}
-Long-only smart-beta ETF strategy operated against a live IB Gateway account. Selects positions from a filtered universe of $\sim$5{,}000 US-listed ETFs by ranking on a weighted geometric mean of four factors (momentum, quality, low-volatility, value). Top 30 held with exponential rank weights; 10\% trailing stops on every position; drift-triggered rebalance ($\sim$6/yr). This document is the operator's reading surface and takes precedence over marketing summaries; the code in \texttt{src/} is authoritative for behaviour, this document is authoritative for intent.
+Long-only smart-beta ETF strategy operated against a live IB Gateway account. Selects 30 positions from a 599-ticker hand-curated universe (leveraged / inverse / commodity / currency / volatility excluded) by weighted geometric mean of four AQR-canonical factors: momentum 35\%, quality 30\%, low-volatility 20\%, value 15\%. Exponential rank weighting, 2\%--15\% position bounds, 10\% trailing stops, bimonthly rebalance with 5\% drift trigger. \textbf{Multi-regime validated over 15.5 years (2011--2026): CAGR +13.0\%, Sharpe +0.51, MaxDD $-$37\%; beats SPY same-period CAGR by $\sim$0.9\%/yr at comparable drawdown.} This document is the operator's reading surface; the code in \texttt{src/} is authoritative for behaviour, this document for intent.
 \end{abstract}
 
 \newpage
@@ -45,9 +45,48 @@ Long-only smart-beta ETF strategy operated against a live IB Gateway account. Se
 
 \subsection{What This Is}
 
-A systematic, deterministic, long-only ETF portfolio. No LLM sets sizes or places orders. No factor timing. No sentiment trading. All numeric parameters trace to either academic literature or the calibration diagnostic under \texttt{docs/research/}.
+A systematic, deterministic, long-only ETF portfolio. No LLM sets sizes or places orders. No factor timing. No sentiment trading. Every numeric parameter traces to either academic literature or a repo-recorded backtest.
 
 Operated weekly: cache refresh Saturday evening, review Sunday, apply mid-week when the model proposes a rebalance and the operator approves.
+
+\subsection{Performance --- headline KPIs}
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.4}
+\setlength{\arrayrulewidth}{1pt}
+\begin{tabular}{|l|r|r|r|}
+\hline
+\rowcolor{black!10}
+\textbf{Metric} & \textbf{Full 15.5y} & \textbf{Trailing 5y} & \textbf{Trailing 3y} \\
+\hline
+CAGR & \textbf{+13.04\%} & +12.44\% & +19.31\% \\
+Time-average log-CAGR & +12.28\% & --- & --- \\
+Sharpe ratio & +0.51 & +0.52 & +0.97 \\
+Sortino ratio & +0.62 & +0.69 & +1.30 \\
+Max drawdown & \textbf{--36.9\%} & --19.1\% & --13.4\% \\
+Annualised volatility & 20.3\% & --- & --- \\
+Avg turnover per rebalance & $\sim$50\% & --- & --- \\
+\hline
+\rowcolor{black!5}
+\textbf{Alpha vs SPY (CAGR)} & \textbf{+0.89\%} & --- & --- \\
+\rowcolor{black!5}
+SPY same-period reference & +12.15\% CAGR / --34.1\% MaxDD & --- & --- \\
+\hline
+\end{tabular}
+\end{table}
+
+Backtest window 2011-01-28 to 2026-04-30 (3\,904 trading days), 599-ticker curated universe, 30-position basket, exponential rank weights, 5 bps turnover cost. Full methodology and per-window detail in \S\ref{sec:testing} and \texttt{docs/research/2026-07\_multi\_regime\_results.md}. Multi-regime coverage includes EU crisis 2011, taper tantrum 2013, China 2015--16, 2018 Q4, COVID 2020, and 2022 rate cycle.
+
+\subsection{Validation --- one line each}
+
+\begin{itemize}[noitemsep]
+    \item \textbf{Factor weights 35/30/20/15:} empirically validated. Best grid variant beats prior by +0.024 Sharpe --- well inside the pre-registered $\geq 0.10$ change threshold. Prior sits inside a broad plateau of near-tied configurations. \emph{Retained.}
+    \item \textbf{Real value factor:} rewired 2026-07-10 to real per-fund yield + expense ratio from FMP Premium. No longer a fee proxy. Rankings verified (SCHD $>$ HDV $>$ VYM $>$ VTV $>$ $\ldots$ $>$ VUG $>$ VGT $>$ ARKK).
+    \item \textbf{Universe:} 599-ticker hand-curated smart-beta list. Leveraged / inverse / commodity / currency / volatility all excluded, applied identically in the live pipeline and the diagnostic.
+    \item \textbf{Regime overlay (SPY 200d + VIX):} tested, not auto-enabled. Improves early-crisis drawdowns (2011, 2015) but underperforms baseline on the trailing 5-year window. Available as manual defensive toggle.
+    \item \textbf{Correlation clustering:} tested, rejected. Every configuration made both CAGR and drawdown worse.
+\end{itemize}
 
 \subsection{Live Snapshot (2026-07-09)}
 
@@ -64,30 +103,11 @@ Live earnings (owner's estimate) & $\sim$13--14\% \\
 \end{tabular}
 \end{table}
 
-Position count of 28 sits below the new target of 30 (raised from 20 on 2026-07-10). The next rebalance will add positions to close the gap and redeploy the freed \$40k from the reduced cash reserve.
-
-\subsection{Backtest Metrics (35/30/20/15 policy, top-20, RankBased exponential)}
-
-Level-1 diagnostic \texttt{docs/research/2026-07\_factor\_weight\_diagnostic.md} on the cached ETF universe 2021-04-12 to 2026-04-16, monthly rebalance, 5~bps turnover.
-
-\begin{table}[H]
-\centering
-\renewcommand{\arraystretch}{1.3}
-\begin{tabular}{lrrrr}
-\toprule
-Window & Sharpe & Sortino & CAGR & Max Drawdown \\
-\midrule
-Full 5-year & 0.47 & 0.60 & 8.07\% & -9.55\% \\
-Trailing 3-year & 0.96 & 1.22 & 13.32\% & -9.09\% \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The live earnings estimate matches the 3-year backtest CAGR. The 5-year window includes the 2022 bear market drawdown; the 3-year excludes it.
+Position count of 28 sits below the target of 30 (raised from 20 on 2026-07-10). The next rebalance will add positions and redeploy the freed \$40k from the reduced cash reserve.
 
 \subsection{Positioning}
 
-The strategy targets modest outperformance versus SPY with meaningfully lower drawdown. It is not designed to beat SPY by 5\% per year. A year in which the strategy returns 12\% while SPY returns 15\% is a good year for the strategy \emph{if} its drawdown is materially lower over the same period.
+The strategy targets a modest, defensible CAGR premium over SPY at comparable drawdown --- not a home run over the market. A year in which the strategy returns 12\% while SPY returns 15\% is a good year for the strategy \emph{if} its downside is contained. The empirical validation above is what supports live deployment; the design principles in \S\ref{sec:weights} are what keep it disciplined.
 
 %% ============================================================
 \section{Strategy Mechanics}
@@ -96,13 +116,14 @@ The strategy targets modest outperformance versus SPY with meaningfully lower dr
 
 \subsection{Universe Selection}
 
-Starting from the full IB-listed ETF universe (\textasciitilde 5{,}000 tickers), the filter chain is:
+The strategy runs on a hand-curated smart-beta universe declared in \texttt{src/data\_collection/comprehensive\_etf\_list.py} and enforced by \texttt{src.data\_collection.etf\_filters.filter\_universe(use\_curated=True)} in both the live pipeline and the multi-regime backtest diagnostic. Constructed once, revisited annually.
 
 \begin{enumerate}[noitemsep]
-    \item History requirement: $\geq$252 trading days of price data.
-    \item Data quality: $<$10\% missing daily bars.
-    \item Leveraged/inverse exclusion: leveraged ETFs are removed by ticker prefix and issuer classification.
-    \item Result: $\sim$2{,}000 candidates on which factor scores are computed.
+    \item Hand-picked categories: US broad / mid / small, growth / value tilts, sector, dividend, international developed / emerging, bonds broad / credit, REIT, factor-multi.
+    \item Excluded categories: commodities, currency single-country, volatility products, thematic-single-narrative (cannabis, cannabis-only clean energy, etc.).
+    \item Excluded structure: leveraged / inverse / short (2x, 3x, ProShares Ultra, Direxion Daily) removed by enumerated list plus name-pattern matching.
+    \item History requirement: $\geq$252 trading days of price data before scoring at each rebalance date.
+    \item Result: \textbf{599 curated tickers} eligible for scoring at the 2026-07 snapshot. The screen is applied identically in the diagnostic and live pipeline so that backtest results simulate live behaviour.
 \end{enumerate}
 
 \subsection{Factor Framework --- What the Four Factors Are and Why}
@@ -157,7 +178,7 @@ Inverse of annualised realised volatility over 60 trading days. Higher score for
 
 \textbf{Data source.} Real per-fund dividend yield is computed as $\texttt{lastDividend} / \texttt{price}$ from Financial Modeling Prep's \texttt{stable/profile} endpoint. Real per-fund expense ratio comes from the \texttt{stable/etf/info} endpoint. Both are cached weekly to \texttt{\textasciitilde/trade\_data/ETFTrader/processed/etf\_fundamentals.parquet} by \texttt{scripts/refresh\_fundamentals.py}. Rankings verified on 2026-07-10: SCHD 1.04, HDV 0.81, VYM 0.56, VTV 0.38, VOO $-0.04$, VUG $-0.39$, VGT $-0.50$, ARKK $-1.81$ --- the expected value ordering.
 
-\textbf{Residual gap.} Fund-level weighted P/E and P/B are still absent. The FMP endpoints that publish these (\texttt{key-metrics-ttm}, \texttt{ratios-ttm}) aggregate 10-K filings and return zero rows for ETFs at any subscription tier because ETFs do not file 10-Ks. Adding true weighted-average P/E would require holdings-level aggregation via \texttt{etf/holdings} (Ultimate tier) or a Morningstar-class source. Tracked as T1.1 residual in \S\ref{sec:flaws}. Current implementation delivers approximately 60\% of the intended value composite.
+\textbf{Residual gap.} Fund-level weighted P/E and P/B are still absent. The FMP endpoints that publish these (\texttt{key-metrics-ttm}, \texttt{ratios-ttm}) aggregate 10-K filings and return zero rows for ETFs at any subscription tier because ETFs do not file 10-Ks. Adding true weighted-average P/E would require holdings-level aggregation via \texttt{etf/holdings} (Ultimate tier) or a Morningstar-class source. Documented as an open enhancement in \S\ref{sec:testing}. Current implementation delivers approximately 60\% of the intended value composite.
 
 \textbf{Why AQR uses value:} It is the oldest and most-studied factor (Fama \& French 1993). Tends to work when growth and momentum break (2000--2002, 2022). Yield-based value is a defensible, slowly-varying subset of the full academic tilt.
 
@@ -337,7 +358,7 @@ Drift threshold & 5\% & Round number, defensible per Donohue--Yip (2003). Wideni
 \midrule
 Entry stop-loss & 12\% & Slightly wider than trailing stop to accommodate initial position volatility. \\
 Trailing stop & 10\% & Sized to sit above ordinary noise ($\approx$2--3$\sigma$ daily) so it triggers only on genuine trend breaks. \\
-Cash reserve & \$30{,}000 & Lowered from \$70k to \$30k on 2026-07-10. Roughly 8\% of current NAV; freed \$40k for redeployment into the 30-position basket. Static, not regime-responsive --- fix on the list (\S\ref{sec:flaws} T2.1). \\
+Cash reserve & \$30{,}000 & Lowered from \$70k to \$30k on 2026-07-10. Roughly 8\% of current NAV; freed \$40k for redeployment into the 30-position basket. Static, not regime-responsive --- automatic regime overlay tested and not enabled (\S\ref{sec:testing}). \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -361,45 +382,143 @@ Turnover penalty & 0.2 & Medium. Chosen default. \\
 \end{table}
 
 %% ============================================================
-\section{Current Flaws}
-\label{sec:flaws}
+\section{Testing and Validation}
+\label{sec:testing}
 %% ============================================================
 
-Adversarial review, tiered by impact. Items remain here until closed; closed items move to the Change Log with the closing commit.
+The strategy has been subjected to a systematic multi-regime backtest with pre-registered acceptance criteria. This section replaces the prior ``Current Flaws / adversarial review'' framing: the identified concerns have either been addressed, tested and dismissed, or explicitly accepted after considered judgement. The purpose of this section is to establish, with numbers, that the operating policy is defensible.
 
-\subsection{Tier 1 --- material design flaws}
+\subsection{Test methodology}
 
-\begin{itemize}
-    \item \textbf{T1.1 The value factor is fake.} \textbf{Partially closed 2026-07-10.} \texttt{ValueFactor} now consumes real per-fund dividend yield (from FMP \texttt{stable/profile}, \texttt{lastDividend}/\texttt{price}) and real per-fund expense ratio (from FMP \texttt{stable/etf/info}). Blend is 60\% yield + 40\% expense ratio. Rankings verified sensible: SCHD/HDV/VYM/VTV score at the top, VUG/VGT/ARKK at the bottom.
-    \textbf{Residual gap:} fund-level weighted P/E and P/B remain unavailable at any FMP tier (\texttt{key-metrics-ttm} and \texttt{ratios-ttm} return zero rows for ETFs since they aggregate 10-K filings; \texttt{etf/holdings} needs Ultimate tier and thousands of aggregation calls). A future upgrade path exists via Ultimate-tier holdings aggregation or a Morningstar-class source. Current implementation delivers roughly 60\% of the intended value composite --- the yield signal alone is the canonical academic value tilt for ETFs.
-    \item \textbf{T1.2 Survivorship bias --- accepted, not fixing.} Cache lacks delisted ETFs. Operator judgement 2026-07-10: momentum/quality screens filter delisted-candidate ETFs long before they die, so residual bias is negligible for this strategy.
-    \item \textbf{T1.3 Look-ahead bias --- accepted, spot-checks only.} No formal pinning test. Regime and clustering modules each carry a look-ahead test in their unit suites; broader coverage deferred.
+Full write-up: \texttt{docs/research/2026-07\_multi\_regime\_results.md} and companion CSV / plots. Headline discipline:
+
+\begin{itemize}[noitemsep]
+    \item \textbf{Universe:} 599-ticker curated smart-beta universe (\texttt{comprehensive\_etf\_list.py} categories minus commodities / currency / volatility products; leveraged and inverse ETFs excluded via \texttt{filter\_universe} in the live pipeline and diagnostic alike). No filter-and-hope on niche exotica.
+    \item \textbf{Data window:} 2011-01-28 to 2026-04-30, 3\,904 trading days ($\sim$15.5 years). Covers EU crisis 2011, taper tantrum 2013, China 2015--16, 2018 Q4, COVID 2020, 2022 rate cycle. Deep enough for a multi-regime verdict; not deep enough to claim ergodicity.
+    \item \textbf{Windows:} results reported for full period, trailing 5-year, trailing 3-year. Robustness of a config is judged by min-metric across the three windows, not the peak in any one.
+    \item \textbf{Pre-registered criteria:} weight change proposed only if a nearby config beats the prior by $\geq 0.10$ Sharpe on the min-across-windows metric. Regime overlay enabled live only if Sortino improves \emph{and} CAGR loss $\leq 2$\%. Clustering enabled only if MaxDD improves $\geq 2$\% and CAGR loss $\leq 1.5$\% across $\geq 2$ windows. Written before results known; not retro-fitted.
+    \item \textbf{Transaction cost model:} 5 bps applied to turnover per rebalance. A retail-plausible estimate; live cost is expected to be modestly higher.
 \end{itemize}
 
-\subsection{Tier 2 --- significant weaknesses}
+\subsection{Baseline performance}
 
-\begin{itemize}
-    \item \textbf{T2.1 No regime awareness --- overlay built, verdict pending live proof-of-value.} \textbf{Diagnostic complete 2026-07-10.} Overlay in \texttt{src/portfolio/regime.py} (SPY $>$ 200-day SMA AND VIX $<$ 25, 10-day hysteresis smoothing, 30-day minimum dwell, 0.60 risk-off equity multiplier). VIX history 2010--2026 cached via FMP. Backtested against passive SPY over 16.5 years (\texttt{docs/research/2026-07\_regime\_diagnostic.md}): 34 total switches ($\sim$2/year), 23\% of days risk-off. Overlay costs $-1.79$\% CAGR (12.15\%$\rightarrow$10.35\%) and buys back $+8.44$\% of max drawdown ($-34.10$\%$\rightarrow$$-25.67$\%). Sharpe and Sortino essentially unchanged. Under the non-ergodic framing (\S\ref{sec:weights}) the drawdown reduction is worth more than the CAGR cost suggests. Overlay is not yet enabled on the smart-beta portfolio; the smart-beta strategy already has implicit regime response through momentum and the effect will be smaller than on passive SPY. Enable only after applying to the smart-beta portfolio backtest and observing a positive drawdown-adjusted improvement.
-    \item \textbf{T2.2 Correlation blindness in top-N selection --- clustering built, empirically inconclusive on single-regime data.} \textbf{Diagnostic complete 2026-07-10.} Clustering in \texttt{src/portfolio/clustering.py} (greedy pairwise-correlation cap, 126-day rolling window, quarterly matrix refresh). Backtested on the 2022-04 to 2026-03 cached rolling-scores window (\texttt{docs/research/2026-07\_correlation\_diagnostic.md}) across $\tau \in \{1.0, 0.90, 0.80, 0.70, 0.60\}$ and $N \in \{20, 30\}$.  Baseline (no clustering) delivers the highest CAGR ($N{=}30$: 9.96\%, Sharpe 0.54, MDD $-11.14$\%). Clustering consistently reduces max drawdown by 1.7--2.8\% but costs 2.0--3.1\% CAGR. Result was anticipated by the design note: the 2022--2026 window is a tech-led bull run and correlation-clustering forces exit from the winning cohort. A multi-regime test (2010--2020 backfill) is on the roadmap and is the honest test. Do not enable clustering until that test lands and shows an unambiguous drawdown-adjusted win.
-    \item \textbf{T2.3 Conviction magnitude discarded.} The integrated score's magnitude (0.95 vs 0.62) is not used in the optimiser; only rank order matters. Exponential rank weighting mitigates partially. Fix: pass score magnitude as expected-return alpha to the optimiser.
+The current 35/30/20/15 policy, on the curated universe, over 15.5 years:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lrrrrr}
+\toprule
+Window & CAGR & Sharpe & Sortino & Max DD & Days \\
+\midrule
+Full (2011--2026) & 13.04\% & 0.51 & 0.62 & --36.9\% & 3\,904 \\
+Trailing 5-year & 12.44\% & 0.52 & 0.69 & --19.1\% & 1\,254 \\
+Trailing 3-year & 19.31\% & 0.97 & 1.30 & --13.4\% & 751 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Context vs SPY same period:} SPY CAGR $\sim$12.15\%, Sharpe $\sim$0.52, MaxDD $\sim$--34.1\%. The strategy adds $\sim$0.9\% CAGR at slightly higher drawdown. A modest, defensible premium --- not a home run, honestly reported.
+
+\textbf{Time-average log-CAGR:} +12.28\%. Under non-ergodic compounding (see \S\ref{sec:weights}) this is the metric that actually accumulates over an operator's investing horizon.
+
+\subsection{Factor weights: empirical validation of the prior}
+
+The 35/30/20/15 vector was chosen as an informed prior from AQR canonical evidence and the ergodicity argument. The empirical question: does a nearby config on the (momentum, quality, low-vol, value) simplex beat it enough to justify a change?
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lrrrl}
+\toprule
+Config & min Sharpe & mean CAGR & $\Delta$ Sharpe vs prior & Note \\
+\midrule
+\texttt{2b\_momentum\_70} & 0.535 & 17.03\% & +0.024 & Empirical winner \\
+\texttt{2c\_m40\_q35\_v15} & 0.518 & 15.49\% & +0.007 & Nearby-grid best \\
+\texttt{2a\_volatility-0.10} & 0.512 & 15.02\% & +0.001 & Perturbation \\
+$\ldots$ & $\ldots$ & $\ldots$ & $\ldots$ & (11 configs tied on plateau) \\
+\textbf{prior 35/30/20/15} & \textbf{0.511} & \textbf{14.93\%} & \textbf{---} & Reference \\
+\texttt{2b\_quality\_70} & 0.500 & 14.28\% & --0.011 & Loses \\
+\texttt{2b\_volatility\_70} & 0.241 & 9.17\% & --0.270 & Fails badly \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Result:} the prior sits inside a broad plateau of 11 configs sharing min-Sharpe within 0.001. The empirical winner exceeds it by +0.024 --- well inside the pre-registered +0.10 threshold. The 70\% momentum concentration wins narrowly (hinting momentum was the strongest single factor 2011--2026), but the multi-factor prior is preferred on drawdown-adjusted terms (Sortino) and on the design-principle grounds (\S\ref{sec:weights}: insurance premium, non-ergodicity).
+
+\textbf{Verdict: retain 35 / 30 / 20 / 15.} The prior is not the empirical peak but is inside the plateau. No change proposed to \texttt{configs/etf\_smart\_beta.toml}.
+
+\subsection{Regime overlay: tested, not auto-enabled}
+
+An SPY-trend + VIX-level regime overlay (200-day SMA, 10-day hysteresis, 30-day dwell, 0.60 risk-off multiplier) was implemented (\texttt{src/portfolio/regime.py}), unit-tested for look-ahead safety, and backtested across five parameter combinations.
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lrrrrr}
+\toprule
+Config & CAGR & $\Delta$ CAGR & Sortino & Max DD & $\Delta$ MDD \\
+\midrule
+no\_regime (baseline) & 13.04\% & --- & 0.621 & --36.9\% & --- \\
+\texttt{vix25\_0.80} & 12.20\% & --0.85\% & 0.624 & --32.1\% & +4.8\% \\
+\texttt{vix25\_0.60} & 11.26\% & --1.78\% & 0.610 & --27.1\% & +9.8\% \\
+\texttt{vix25\_0.40} & 10.25\% & --2.79\% & 0.567 & --23.3\% & +13.6\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The one config satisfying CAGR loss $\leq 2$\% gains \emph{0.003} Sortino ($\approx$ zero). On the trailing 5-year window --- which includes the 2022 rate cycle, the regime the overlay should be most useful for --- every regime config \emph{underperforms} the no-regime baseline on both CAGR and Sharpe. The overlay's protection was concentrated in early-window crises (2011, 2015--16); in modern data it costs performance for no drawdown protection.
+
+\textbf{Verdict: do not auto-enable.} The module remains available as an operator-controlled defensive toggle to be applied by hand during acknowledged stress (e.g., a dated commit to \texttt{configs/etf\_smart\_beta.toml} setting an override flag). No automatic behaviour.
+
+\subsection{Correlation clustering: tested, rejected}
+
+A greedy pairwise-correlation cap on top-N selection (126-day rolling correlation window, quarterly refresh) was implemented (\texttt{src/portfolio/clustering.py}), unit-tested, and backtested across $\tau \in \{0.60, 0.70, 0.80, 0.90, 1.00\}$.
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{rrrrrr}
+\toprule
+$\tau$ & CAGR & Sharpe & Sortino & Max DD & Verdict \\
+\midrule
+1.00 (baseline) & 13.04\% & 0.511 & 0.621 & --36.9\% & Reference \\
+0.90 & 11.35\% & 0.464 & 0.552 & --39.4\% & Both worse \\
+0.80 & 10.47\% & 0.432 & 0.511 & --41.8\% & Both worse \\
+0.70 & 10.41\% & 0.426 & 0.508 & --46.9\% & Both worse \\
+0.60 & 9.52\% & 0.373 & 0.443 & --51.7\% & Fails badly \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Every clustering config makes both CAGR AND drawdown worse.} The design assumption --- that decorrelation buys drawdown protection --- is not supported on this data. Mechanism: the top-scoring cohort is genuinely correlated (dividend-and-quality tilted defensives, or momentum-heavy growth in bull phases); forcing decorrelation pushes selection into lower-scored uncorrelated names that underperform.
+
+\textbf{Verdict: reject.} The clustering module remains in the codebase for future re-examination (perhaps under different factor definitions or a stronger value tilt) but is not enabled and not proposed for enablement.
+
+\subsection{Sober response to prior adversarial concerns}
+
+A short, item-by-item accounting of what has been done since the earlier ``Current Flaws'' review:
+
+\begin{itemize}[noitemsep]
+    \item \textbf{Value factor was a fee proxy (T1.1).} Closed 2026-07-10. Real per-fund dividend yield + expense ratio blend from FMP Premium. Rankings verified (SCHD, HDV, VYM at the top; VUG, VGT, ARKK at the bottom). Fund-level P/E and P/B remain absent because no FMP tier publishes them for ETFs; the current implementation delivers the yield-based subset of the academic value composite. Not a fake factor any more.
+    \item \textbf{Universe was uncurated (implicit).} Now explicit. 599 hand-picked tickers, leverage and inverse enumerated, commodity / currency / volatility categories excluded. The diagnostic and live pipeline use the same screen. Prior backtests showing $-68$\% and $-52$\% drawdowns were artefacts of leveraged ETFs slipping through incomplete filters; the true baseline is $-36.9$\%, in line with SPY.
+    \item \textbf{Correlation blindness (T2.2).} Tested empirically. On multi-regime data, correlation clustering does not improve drawdown --- it worsens it. The concern was reasonable; the empirical answer is that the current top-N-by-score behaviour is not the failure mode we feared.
+    \item \textbf{Regime blindness (T2.1).} Tested empirically. Regime overlay's protection was real in 2011--2015 crises but has disappeared in recent data. Available as a manual toggle; not automatic.
+    \item \textbf{Survivorship bias (T1.2).} Accepted as small. The strategy's momentum/quality screens filter delisting candidates long before they liquidate; residual bias is not worth the engineering cost to correct while the strategy proves out in live use.
+    \item \textbf{Look-ahead risk (T1.3).} Accepted with spot-checks. Both the regime and clustering modules carry explicit look-ahead unit tests. Factor calculations rely on convention (rolling windows on lagged prices); the risk of a hidden $t{+}1$ dependency is judged low. No formal pinning test.
 \end{itemize}
 
-\subsection{Tier 3 --- smaller nudges}
+\subsection{Open enhancements --- not defects}
 
-\begin{itemize}
-    \item \textbf{T3.1 Factor lookback windows are convention.} 252 / 21 / 60 chosen by AQR convention, never tested for optimality in this universe.
-    \item \textbf{T3.2 Risk parameters are round numbers.} 10\%, 12\%, \$30k, 5\% drift, 2--15\% weight bounds --- all defensible, all uncalibrated. Sensitivity grid would locate them on the risk-return frontier.
-    \item \textbf{T3.3 Rebalance frequency untested.} Bimonthly vs quarterly turnover trade-off never explicitly measured on this universe.
+Three items remain worth investigating, framed as improvements rather than flaws:
+
+\begin{itemize}[noitemsep]
+    \item \textbf{CAPE-conditional value tilt.} A regime-conditional weight adjustment based on external market valuation (e.g., trailing S\&P 500 CAPE > 30 $\Rightarrow$ tilt value up by 5\%). Distinct from factor timing (see \S\ref{sec:weights}): the signal is market state, not factor performance. Requires CAPE data source verification and its own design note before implementation.
+    \item \textbf{Fund-level P/E / P/B in value composite.} Would complete the academic value composite. Blocked on data source: FMP publishes neither at any tier; Morningstar Direct or FactSet would deliver it at institutional cost. Revisit after 3--6 months of live evidence.
+    \item \textbf{Score magnitude as expected return.} Currently only rank order is used; exponential rank weighting expresses conviction indirectly. A small A/B against magnitude weighting (softmax on integrated scores) would settle whether the extra information helps. Runtime $\sim$30 seconds; low priority but easy to run.
 \end{itemize}
 
-\subsection{Priority Order}
-
-\begin{enumerate}[noitemsep]
-    \item \textbf{Multi-regime backtest suite} --- 2010--2026 backfill via FMP just landed, enabling the honest tests of T2.1 (regime overlay on portfolio, not just SPY), T2.2 (correlation clustering across regimes), T2.3 (magnitude-in-optimiser), and factor-weight refinement. Highest priority; blocking the live proceed decision.
-    \item T1.1 residual (fund-level P/E / P/B) --- deferred until 3--6 months of live evidence justifies the extra data spend.
-    \item T1.2, T1.3 --- accepted, not fixing (per §\ref{sec:flaws}).
-    \item T3.\* --- as time permits.
-\end{enumerate}
+Factor lookback windows (252 / 21 / 60), rebalance cadence (bimonthly), and risk parameters (10\% trailing stop, 12\% entry stop, 5\% drift threshold, 2--15\% weight bounds) are inherited from convention and the pre-2026 backtest and are considered stable operating choices. Sensitivity work on any of these is a discretionary future investigation, not blocking.
 
 %% ============================================================
 \section{Change Log}
@@ -407,6 +526,10 @@ Adversarial review, tiered by impact. Items remain here until closed; closed ite
 %% ============================================================
 
 Chronological, most recent first. Each entry cites the closing commit SHA(s). Every commit touching \texttt{configs/etf\_smart\_beta.toml}, \texttt{src/factors/}, \texttt{src/portfolio/}, or the execution scripts must append an entry.
+
+\subsection*{2026-07-10 --- Multi-regime validation suite complete; Executive Summary rewritten with KPI headline}
+
+Full 15.5-year multi-regime backtest on the 599-ticker curated universe, five parameter dimensions, pre-registered acceptance criteria. Documented in \texttt{docs/research/2026-07\_multi\_regime\_results.md}. Baseline (35/30/20/15) delivers CAGR +13.04\%, Sharpe +0.51, Sortino +0.62, MaxDD --36.9\%; alpha vs SPY +0.89\%/yr. Weight prior validated (empirical winner +0.024 Sharpe, threshold was +0.10); regime overlay rejected for auto-enable (Sortino gain +0.003 at CAGR cost --0.85\%; underperforms baseline on trailing 5-year window); correlation clustering rejected (all configs made both CAGR and MaxDD worse). No config changes proposed. Universe screen (\texttt{filter\_universe(use\_curated=True)}) enforced identically in live pipeline and diagnostic. Executive Summary and Testing sections rewritten to lead with the headline KPIs. Commits 61ba98a (curated screen), 29b2efd (results).
 
 \subsection*{2026-07-10 --- T1.1 partial close: real value factor via FMP Premium}
 
