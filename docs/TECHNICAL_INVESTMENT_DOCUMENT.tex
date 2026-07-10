@@ -146,97 +146,151 @@ The three principles together create a filter that admits deliberate, evidence-a
 
 The values below are the current live policy. They mirror \texttt{configs/etf\_smart\_beta.toml}. When the TOML changes, this section changes and the Change Log records the diff.
 
+Each row's \emph{Justification} column is designed to be self-contained: reading this section alone should be enough to understand every value's ``why'' without hopping into the body of the document. Deeper arguments (e.g. the ergodicity reasoning behind the factor weights) live in cross-referenced sections but are summarised in one line here.
+
 \subsection{Portfolio Construction Parameters}
 
 \begin{table}[H]
 \centering
-\renewcommand{\arraystretch}{1.3}
-\begin{tabular}{lll}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{p{3.5cm}p{1.5cm}p{9cm}}
 \toprule
 \textbf{Parameter} & \textbf{Value} & \textbf{Justification} \\
 \midrule
-\texttt{num\_positions} & 20 & Historic default; drift from tech-doc target of 30 tracked in backlog \\
-\texttt{min\_weight} & 2\% & Historic default \\
-\texttt{max\_weight} & 15\% & Historic default; tech-doc target 8\% \\
-\texttt{tax\_status} & \texttt{taxable} & Operator declared taxable status \\
+\texttt{num\_positions} & 20 &
+Historic operating default. The v4.x design target was 30 for better diversification; live has not been updated to match. Drift item P1 in \texttt{docs/RESEARCH\_BACKLOG.md}. \\
+
+\texttt{min\_weight} & 2\% &
+Historic default. Chosen so a full 20-position portfolio at floor uses 40\% of NAV, leaving room for over-weight tilt. Not calibrated. \\
+
+\texttt{max\_weight} & 15\% &
+Historic default. Caps single-position concentration. The v4.x design used 3--8\% under Robust MVO; live's wider bounds allow the RankBased weighting scheme to express conviction. Drift item P1. \\
+
+\texttt{tax\_status} & \texttt{taxable} &
+Operator declared taxable status. Signals to any future tax-lot / wash-sale logic that this account has real capital-gains consequences. \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \subsection{Factor Weights (informed prior)}
 
+The full argument is at \S\ref{sec:weight_justification}. In one paragraph: the weights are an informed prior, not an in-sample optimum. The July~2026 diagnostic showed the mechanical winner is momentum-heavy (80--90\% momentum), but that finding is single-regime and adopting it would concentrate exactly the exposure the operator is on record as most concerned about. The current weights pay drawdown-insurance premia via quality and volatility, which are worth more than arithmetic-Sharpe metrics suggest in a non-ergodic system.
+
 \begin{table}[H]
 \centering
-\renewcommand{\arraystretch}{1.3}
-\begin{tabular}{lll}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{p{2.5cm}p{1.2cm}p{9.5cm}}
 \toprule
 \textbf{Factor} & \textbf{Weight} & \textbf{Justification} \\
 \midrule
-momentum   & 35\% & See \S\ref{sec:weight_justification} --- informed prior \\
-quality    & 30\% & Insurance premium against drawdown asymmetry \\
-volatility & 20\% & Insurance premium; low-vol anomaly \\
-value      & 15\% & \textbf{Proxied by expense ratio only --- see \S\ref{sec:adversarial} T1.1} \\
+momentum   & 35\% &
+Largest weight reflects momentum's status as the strongest and most robust empirical premium (AQR 2014). Bounded below 40\% to avoid single-factor concentration; a heavier tilt would re-introduce the whipsaw / regime-fragility that quality and low-vol are here to hedge. \\
+
+quality    & 30\% &
+Insurance premium against drawdown asymmetry: quality tends to hold up in stress regimes (2000--2002, 2022). Not an alpha bet in the arithmetic sense; the value is in reducing multiplicative-return losses on the actual path. \\
+
+volatility & 20\% &
+Low-volatility anomaly (Baker--Bradley--Wurgler 2011). Second regime hedge. Bounded above 10\% because below that its weight in the geometric mean is too small to move the ranking; below the multi-factor-consistency threshold. \\
+
+value      & 15\% &
+\textbf{Currently proxied by expense ratio only} --- effectively a low-fee preference, not a value factor. The 15\% weight is buying almost nothing. This is adversarial-review item T1.1 (\S\ref{sec:adversarial}) and the highest single-value fix in the system. \\
 \bottomrule
 \end{tabular}
 \end{table}
 
+Weight vector is constrained: all four in $[10\%, 40\%]$, ordering momentum $>$ quality $>$ volatility $>$ value reflects AQR empirical premium ordering. Sums to 100\%. Regularised deliberately away from any in-sample optimum.
+
 \subsection{Factor Calculation Windows}
+
+Windows are academic convention rather than universe-specific calibration. Momentum in particular is robust to lookback choice; volatility less so. Retested in adversarial-review item T3.1.
 
 \begin{table}[H]
 \centering
-\begin{tabular}{ll}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{p{4cm}p{2.5cm}p{7cm}}
 \toprule
-\textbf{Parameter} & \textbf{Value} \\
+\textbf{Parameter} & \textbf{Value} & \textbf{Justification} \\
 \midrule
-\texttt{momentum} lookback & 252 trading days (AQR / Jegadeesh-Titman) \\
-\texttt{momentum\_skip\_recent} & 21 trading days (Novy-Marx 2012 short-term reversal skip) \\
-\texttt{quality} lookback & 252 trading days \\
-\texttt{value} lookback & 252 trading days \\
-\texttt{volatility} lookback & 60 trading days \\
+\texttt{momentum} lookback & 252 days &
+12-month formation window. \textbf{Jegadeesh \& Titman (1993)} established this as the canonical momentum period. \\
+
+\texttt{momentum\_skip\_recent} & 21 days &
+1-month reversal skip. \textbf{Novy-Marx (2012)} showed that skipping the most recent month improves the momentum premium by avoiding short-term mean reversion. \\
+
+\texttt{quality} lookback & 252 days &
+12 months. AQR convention; long enough for the Sharpe / drawdown / stability components to average out estimation noise. \\
+
+\texttt{value} lookback & 252 days &
+Unused while value is proxied by expense ratio (a static per-ETF field). Retained for when a real fundamentals-based value factor lands (T1.1). \\
+
+\texttt{volatility} lookback & 60 days &
+$\sim$3 months of realised daily returns. Short enough to be current; long enough to smooth intraday noise. Standard practice. \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \subsection{Rebalancing}
 
+Governed by Design Principle 3 (\S\ref{sec:principle_slowly_varying}): drift thresholds \emph{err high}. Tighter thresholds cause more trading on smaller deviations --- the textbook definition of whipsaw.
+
 \begin{table}[H]
 \centering
-\begin{tabular}{lll}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{p{3.5cm}p{2.5cm}p{8cm}}
 \toprule
 \textbf{Parameter} & \textbf{Value} & \textbf{Justification} \\
 \midrule
-\texttt{frequency} & \texttt{bimonthly} (\textasciitilde 6/yr) & Historic default; tech-doc target quarterly \\
-\texttt{drift\_threshold} & 5\% & Round number; not calibrated \\
+\texttt{frequency} & \texttt{bimonthly} $\sim$6/yr &
+Historic operating default. v4.x design targets quarterly ($\sim$4/yr) for lower turnover; live has not been updated. Empirical trade-off (turnover cost vs signal freshness) is untested here (T3.3). \\
+
+\texttt{drift\_threshold} & 5\% &
+Rebalance when any position's actual weight deviates from target by $>$5\%. Round number, defensible per Donohue--Yip (2003) rebalancing literature. Not universe-calibrated. Widening (7.5\%, 10\%) is considered before tightening. \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \subsection{Risk Management}
 
+Stops are round numbers. Their defensibility comes from Design Principle 3: the 10\% trailing stop sits comfortably above typical intraday and weekly volatility for this universe, so it does not trigger on ordinary market noise. Anything tighter would whipsaw. Sensitivity untested (T3.2).
+
 \begin{table}[H]
 \centering
-\begin{tabular}{lll}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{p{4cm}p{2cm}p{8cm}}
 \toprule
 \textbf{Parameter} & \textbf{Value} & \textbf{Justification} \\
 \midrule
-\texttt{entry\_stop\_loss\_pct} & 12\% & Round number; not calibrated \\
-\texttt{trailing\_stop\_pct}   & 10\% & Round number; not calibrated \\
-\texttt{cash\_reserve}         & \$70{,}000 & Round number; $\approx$18\% of current NAV \\
+\texttt{entry\_stop\_loss\_pct} & 12\% &
+Fixed stop 12\% below the entry price. Slightly wider than the trailing stop to accommodate initial-position volatility before the trailing high-water mark establishes. Round number, not calibrated. \\
+
+\texttt{trailing\_stop\_pct} & 10\% &
+Trailing stop 10\% below the running high. Sized to sit above ordinary noise (10\% is $\approx$2--3 daily standard deviations on typical dividend-ETF holdings) --- triggers only on genuine trend breaks. See T3.2. \\
+
+\texttt{cash\_reserve} & \$70{,}000 &
+Fixed minimum cash held unallocated. At current NAV $\approx$\$390k, this is $\approx$18\%. \textbf{Fixed allocation, not regime-responsive.} Adversarial-review item T2.1 proposes replacing the static reserve with a regime-conditional cash tilt (SPY 200d + VIX overlay). \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\subsection{Optimiser Priors (used by MVO variant)}
+\subsection{Optimiser Priors (used by MVO variant only)}
+
+The live default optimiser is \texttt{RankBased} (exponential rank weighting; no covariance estimation, no MVO priors). These values are used only when \texttt{OPTIMIZER\_TYPE = "mvo"} is selected.
 
 \begin{table}[H]
 \centering
-\begin{tabular}{lll}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{p{4cm}p{1.5cm}p{8.5cm}}
 \toprule
-\textbf{Parameter} & \textbf{Value} & \textbf{Notes} \\
+\textbf{Parameter} & \textbf{Value} & \textbf{Justification} \\
 \midrule
-\texttt{risk\_aversion}      & 1.5 & Standard MVO $\lambda$; risk-tolerant end of retail range \\
-\texttt{robustness\_penalty} & 0.7 & Axioma $\gamma$; aggressive; not calibrated \\
-\texttt{turnover\_penalty}   & 0.2 & Medium; not calibrated \\
+\texttt{risk\_aversion} $\lambda$ & 1.5 &
+Standard mean-variance risk-aversion coefficient. Meucci-style retail range is 2--4; 1.5 is on the risk-tolerant end. Chosen default, not calibrated. \\
+
+\texttt{robustness\_penalty} $\gamma$ & 0.7 &
+Axioma-style penalty on portfolio-level risk uncertainty. Range is 0--1; 0.7 is aggressive. Chosen default, not calibrated. \\
+
+\texttt{turnover\_penalty} & 0.2 &
+Penalty on portfolio turnover, feeding the objective. Medium magnitude. Chosen default, not calibrated. \\
 \bottomrule
 \end{tabular}
 \end{table}
