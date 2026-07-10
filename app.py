@@ -280,14 +280,51 @@ with tab_setup:
 
         if st.button("Pull snapshot", type="primary"):
             with st.spinner("Connecting to IB Gateway..."):
-                try:
-                    ib = connect_read_only(
-                        host=ib_host,
-                        port=int(ib_port),
-                        client_id=int(ib_client_id),
-                    )
-                    snap = fetch_snapshot(ib)
-                    ib.disconnect()
+                # Rotate client ID within a small band around the user's
+                # default. IB refuses re-connection under an ID whose
+                # previous session hasn't been cleaned up (error 326).
+                # Streamlit's rerun model + a hanging connection makes this
+                # common. Retry across a small range instead of failing.
+                ib = None
+                snap = None
+                candidate_ids = [int(ib_client_id)] + [
+                    int(ib_client_id) + i for i in range(1, 10)
+                ]
+                last_exc: Exception | None = None
+                for cid in candidate_ids:
+                    try:
+                        ib = connect_read_only(
+                            host=ib_host,
+                            port=int(ib_port),
+                            client_id=cid,
+                        )
+                        snap = fetch_snapshot(ib)
+                        try:
+                            ib.disconnect()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        if cid != int(ib_client_id):
+                            st.info(
+                                f"Client ID {ib_client_id} was busy — "
+                                f"connected under {cid} instead. Next "
+                                f"snapshot will try {ib_client_id} again."
+                            )
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        last_exc = exc
+                        # Best-effort cleanup before trying the next ID.
+                        if ib is not None:
+                            try:
+                                ib.disconnect()
+                            except Exception:
+                                pass
+                            ib = None
+                        # If it's clearly not a client-id collision, don't
+                        # keep trying other IDs — surface the real error.
+                        if "326" not in str(exc) and "already in use" not in str(exc):
+                            break
+
+                if snap is not None:
                     st.session_state["ib_snapshot"] = snap
                     hist = append_nav_snapshot(snap)
                     st.session_state["nav_history"] = hist
@@ -296,9 +333,15 @@ with tab_setup:
                         f"{len(snap.positions)} positions, "
                         f"{len(snap.open_orders)} open orders."
                     )
-                except Exception as exc:  # noqa: BLE001
+                else:
                     st.session_state["ib_snapshot"] = None
-                    st.error(f"IB connection failed: {exc}")
+                    st.error(
+                        f"IB connection failed after trying client IDs "
+                        f"{candidate_ids[0]}–{candidate_ids[-1]}. "
+                        f"Last error: {last_exc}. Fix: kill any lingering "
+                        f"Python process holding a socket, or restart IB "
+                        f"Gateway."
+                    )
 
     snap = st.session_state.get("ib_snapshot")
     if snap is not None:

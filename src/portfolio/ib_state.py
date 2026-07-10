@@ -80,7 +80,13 @@ def back_project_equity_curve(
     if not positions:
         return pd.DataFrame(columns=["book_value", "cash", "total"])
 
-    end_date = pd.Timestamp(snapshot.timestamp).normalize()
+    # Strip timezone so we can compare against the parquet's tz-naive
+    # DatetimeIndex. The snapshot timestamp is tz-aware from IB but the
+    # price cache indices are naive dates. Handle both aware and naive.
+    _ts = pd.Timestamp(snapshot.timestamp)
+    if _ts.tz is not None:
+        _ts = _ts.tz_convert("UTC").tz_localize(None)
+    end_date = _ts.normalize()
     start_date = end_date - pd.Timedelta(days=days)
 
     frames: dict[str, pd.Series] = {}
