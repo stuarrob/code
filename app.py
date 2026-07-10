@@ -1010,7 +1010,7 @@ with tab_explain:
                 "Approximate cost: $0.01–0.05 per rebalance narration."
             )
         else:
-            c1, c2 = st.columns([1, 3])
+            c1, c2, c3 = st.columns([1, 1, 2])
             with c1:
                 model = st.text_input(
                     "Model",
@@ -1019,26 +1019,43 @@ with tab_explain:
                     help="Anthropic model ID. Default is the latest Opus "
                          "verified against your API key.",
                 )
-                if st.button("Generate LLM narration", type="primary"):
-                    with st.spinner("Claude is reading the proposal…"):
-                        try:
-                            llm_text = narrate_with_claude(
-                                proposal=proposal,
-                                deterministic_narration=deterministic,
-                                user_question=None,
-                                model=model,
-                            )
-                            st.session_state["llm_narration"] = llm_text
-                        except Exception as exc:  # noqa: BLE001
-                            st.error(f"LLM narration failed: {exc}")
-
             with c2:
+                thinking_effort = st.selectbox(
+                    "Thinking",
+                    options=["off", "low", "medium", "high"],
+                    index=2,  # medium
+                    help=(
+                        "Extended thinking: Claude reasons before answering. "
+                        "off = fastest / cheapest; medium = default, ~2-3x "
+                        "cost, meaningfully better on nuanced trade analysis; "
+                        "high = 5-8x cost, for hard questions."
+                    ),
+                )
+            with c3:
                 st.caption(
                     "Claude is instructed to explain WHY the trades make sense "
                     "given the factor tilts — not to invent numbers or propose "
                     "alternatives. If the model contradicts the deterministic "
                     "summary on a factual claim, trust the deterministic one."
                 )
+
+            _effort_kwarg = None if thinking_effort == "off" else thinking_effort
+            if st.button("Generate LLM narration", type="primary"):
+                with st.spinner(
+                    "Claude is thinking about the proposal…" if _effort_kwarg
+                    else "Claude is reading the proposal…"
+                ):
+                    try:
+                        llm_text = narrate_with_claude(
+                            proposal=proposal,
+                            deterministic_narration=deterministic,
+                            user_question=None,
+                            model=model,
+                            thinking_effort=_effort_kwarg,
+                        )
+                        st.session_state["llm_narration"] = llm_text
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(f"LLM narration failed: {exc}")
 
             llm_narration = st.session_state.get("llm_narration")
             if llm_narration:
@@ -1057,13 +1074,17 @@ with tab_explain:
                 label_visibility="collapsed",
             )
             if st.button("Ask Claude", disabled=not question):
-                with st.spinner("Claude is answering…"):
+                with st.spinner(
+                    "Claude is thinking about your question…" if _effort_kwarg
+                    else "Claude is answering…"
+                ):
                     try:
                         answer = narrate_with_claude(
                             proposal=proposal,
                             deterministic_narration=deterministic,
                             user_question=question,
                             model=model,
+                            thinking_effort=_effort_kwarg,
                         )
                         # Keep a small Q&A log for the session.
                         qa_log = st.session_state.setdefault("qa_log", [])

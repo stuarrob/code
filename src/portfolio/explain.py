@@ -220,24 +220,33 @@ def narrate_with_claude(
     deterministic_narration: str,
     user_question: Optional[str] = None,
     model: str = DEFAULT_ANTHROPIC_MODEL,
-    max_tokens: int = 800,
+    max_tokens: int = 2000,
+    thinking_effort: Optional[str] = "medium",
 ) -> str:
-    """Send the proposal + deterministic narration to Claude and return the response.
+    """Send the proposal + deterministic narration to Claude and return text.
 
     Args:
         proposal: the ground-truth trade proposal.
-        deterministic_narration: what `narrate_proposal(proposal)` produced;
+        deterministic_narration: `narrate_proposal(proposal)` output;
             passed as reference so the LLM cannot drift from the numbers.
         user_question: optional operator question (Q&A mode). If None,
             the LLM produces an initial narration.
-        model: Anthropic model ID. Default is claude-sonnet-4-5.
-        max_tokens: response cap.
+        model: Anthropic model ID.
+        max_tokens: cap on the final response.
+        thinking_effort: extended-thinking effort. One of "low", "medium",
+            "high", or None to disable thinking entirely.
+            - low: fast; roughly baseline cost
+            - medium (default): the model reasons before answering; ~2-3x
+              baseline cost; noticeably better on nuanced trade questions.
+            - high: for hard questions only; ~5-8x cost.
+            None: no thinking (matches previous behaviour). Verified against
+            claude-opus-4-8 via API probe 2026-07-10.
 
     Returns:
-        Model response as plain text (may include markdown).
+        Model response text, dollar-escaped for Streamlit rendering.
 
     Raises:
-        RuntimeError if the SDK isn't installed or the key is missing.
+        RuntimeError if SDK missing or key not set.
     """
     if not anthropic_available():
         raise RuntimeError(
@@ -274,12 +283,22 @@ def narrate_with_claude(
             "---\n" + deterministic_narration + "\n---"
         )
 
-    resp = client.messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        system=_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    kwargs: dict = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": _SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if thinking_effort in ("low", "medium", "high"):
+        # Adaptive thinking is the Opus 4.8 shape (verified via API probe
+        # 2026-07-10). Adds reasoning-token cost but improves nuanced
+        # analysis; effort selects budget.
+        kwargs["thinking"] = {"type": "adaptive"}
+        kwargs["output_config"] = {"effort": thinking_effort}
+
+    resp = client.messages.create(**kwargs)
+    # Only extract text blocks. Thinking blocks (`b.type == "thinking"`)
+    # are internal reasoning — never shown to the operator.
     parts = [block.text for block in resp.content if hasattr(block, "text")]
     text = "\n\n".join(parts).strip()
     return _escape_streamlit_dollars(text)
