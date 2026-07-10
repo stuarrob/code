@@ -81,12 +81,20 @@ class TestComputeRegimeSignal:
         assert s.iloc[-1] == 0
 
     def test_dwell_prevents_flicker(self):
-        """A single-day dip below SMA should not flip the regime."""
+        """A single-day dip below SMA should not flip the regime.
+
+        SPY is a mild uptrend so its 100d SMA is always slightly below the
+        price → trend is stably risk-on. Inject a single one-day crash and
+        VIX spike at index 250; hysteresis + dwell should suppress the flip.
+        """
         n = 500
-        spy = pd.Series(200.0, index=_dates(n))
-        # Inject a single day where SPY dips below the SMA and VIX spikes.
-        spy.iloc[250] = 100.0
+        # Slight uptrend so SPY > SMA cleanly for most days.
+        spy = pd.Series(200.0 + np.arange(n) * 0.02, index=_dates(n))
+        # Ensure the flat pre-warmup section is above its own SMA once
+        # the window fills — arange gives us that.
         vix = pd.Series(15.0, index=_dates(n))
+        # Inject a single one-day dip below SMA and VIX spike.
+        spy.iloc[250] = 100.0
         vix.iloc[250] = 40.0
         cfg = RegimeConfig(trend_sma_days=100, vix_threshold=25.0,
                            hysteresis_days=10, min_dwell_days=30)

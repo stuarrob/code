@@ -34,23 +34,27 @@ except ModuleNotFoundError:
 logger = get_logger(__name__)
 
 
-VIX_CACHE_PATH = (
-    Path.home() / "trade_data" / "ETFTrader" / "processed" / "vix_daily.parquet"
-)
+_PROCESSED_DIR = Path.home() / "trade_data" / "ETFTrader" / "processed"
+VIX_CACHE_PATH = _PROCESSED_DIR / "vix_daily.parquet"
+SPY_CACHE_PATH = _PROCESSED_DIR / "spy_daily.parquet"
 _BASE_URL = "https://financialmodelingprep.com/stable"
 
 
-def fetch_vix_history(
+def fetch_daily_history(
+    symbol: str,
     from_date: str = "2010-01-01",
     api_key: Optional[str] = None,
     timeout_sec: float = 30.0,
 ) -> Optional[pd.DataFrame]:
-    """Fetch daily VIX OHLCV from FMP historical-price-eod.
+    """Fetch daily OHLCV for any FMP-supported symbol.
+
+    Verified 2026-07-10 on Premium tier for ^VIX (4176 rows 2010-2026)
+    and SPY (4153 rows 2010-2026).
 
     Args:
-        from_date: ISO date to fetch from. FMP returns up to their retained
-            history (verified: at least back to 2024-01-01 on Premium;
-            older is available but not verified this session).
+        symbol: FMP symbol. Use "^VIX" for VIX (caret is URL-encoded on
+            the way out — do not pre-encode).
+        from_date: ISO date to fetch from.
         api_key: FMP API key. Falls back to `FMP_API_KEY` env var.
         timeout_sec: HTTP timeout.
 
@@ -60,40 +64,40 @@ def fetch_vix_history(
     """
     key = api_key or os.environ.get("FMP_API_KEY")
     if not key:
-        logger.warning("fetch_vix_history: FMP_API_KEY not set")
+        logger.warning(f"fetch_daily_history({symbol}): FMP_API_KEY not set")
         return None
 
-    # VIX symbol is ^VIX; URL-encode the caret.
-    symbol = quote("^VIX", safe="")
     url = f"{_BASE_URL}/historical-price-eod/full"
     try:
         resp = requests.get(
             url,
-            params={"symbol": "^VIX", "from": from_date, "apikey": key},
+            params={"symbol": symbol, "from": from_date, "apikey": key},
             timeout=timeout_sec,
         )
     except requests.RequestException as exc:
-        logger.warning(f"fetch_vix_history: request error: {exc}")
+        logger.warning(f"fetch_daily_history({symbol}): request error: {exc}")
         return None
 
     if resp.status_code != 200:
-        logger.warning(f"fetch_vix_history: HTTP {resp.status_code}: {resp.text[:200]}")
+        logger.warning(
+            f"fetch_daily_history({symbol}): HTTP {resp.status_code}: {resp.text[:200]}"
+        )
         return None
 
     try:
         payload = resp.json()
     except ValueError:
-        logger.warning("fetch_vix_history: non-JSON response")
+        logger.warning(f"fetch_daily_history({symbol}): non-JSON response")
         return None
 
-    # FMP `stable/historical-price-eod/full` returns a flat list of rows,
-    # not a wrapped dict. Guard against future format changes just in case.
     if isinstance(payload, dict) and "historical" in payload:
         rows = payload["historical"]
     elif isinstance(payload, list):
         rows = payload
     else:
-        logger.warning(f"fetch_vix_history: unrecognised payload shape: {type(payload)}")
+        logger.warning(
+            f"fetch_daily_history({symbol}): unrecognised payload shape: {type(payload)}"
+        )
         return None
 
     if not rows:
@@ -101,31 +105,54 @@ def fetch_vix_history(
 
     df = pd.DataFrame(rows)
     if "date" not in df.columns:
-        logger.warning(f"fetch_vix_history: 'date' column missing; got {list(df.columns)}")
+        logger.warning(
+            f"fetch_daily_history({symbol}): 'date' column missing; got {list(df.columns)}"
+        )
         return None
 
     df["date"] = pd.to_datetime(df["date"])
     df = df.set_index("date").sort_index()
-    # Keep the columns we care about; ignore vwap/change/etc. — they're
-    # derivable and add cache size for no reason.
     keep = [c for c in ["open", "high", "low", "close", "volume"] if c in df.columns]
     return df[keep]
 
 
-def save_vix_cache(df: pd.DataFrame, path: Path = VIX_CACHE_PATH) -> None:
-    """Persist VIX history with a fetch-timestamp column added."""
+# Convenience wrappers preserve call sites of the previous `fetch_vix_history`.
+def fetch_vix_history(from_date: str = "2010-01-01", **kwargs) -> Optional[pd.DataFrame]:
+    return fetch_daily_history("^VIX", from_date=from_date, **kwargs)
+
+
+def fetch_spy_history(from_date: str = "2010-01-01", **kwargs) -> Optional[pd.DataFrame]:
+    return fetch_daily_history("SPY", from_date=from_date, **kwargs)
+
+
+def _save_cache(df: pd.DataFrame, path: Path, label: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     out = df.copy()
     out["fetched_at"] = datetime.utcnow().isoformat()
     out.to_parquet(path)
-    logger.info(f"vix: wrote {len(out)} rows to {path}")
+    logger.info(f"{label}: wrote {len(out)} rows to {path}")
 
 
-def load_vix_cache(path: Path = VIX_CACHE_PATH) -> Optional[pd.DataFrame]:
-    """Return cached VIX series (date-indexed) or None if missing."""
+def save_vix_cache(df: pd.DataFrame, path: Path = VIX_CACHE_PATH) -> None:
+    _save_cache(df, path, "vix")
+
+
+def save_spy_cache(df: pd.DataFrame, path: Path = SPY_CACHE_PATH) -> None:
+    _save_cache(df, path, "spy")
+
+
+def _load_cache(path: Path) -> Optional[pd.DataFrame]:
     if not path.exists():
         return None
     df = pd.read_parquet(path)
     if "fetched_at" in df.columns:
         df = df.drop(columns=["fetched_at"])
     return df
+
+
+def load_vix_cache(path: Path = VIX_CACHE_PATH) -> Optional[pd.DataFrame]:
+    return _load_cache(path)
+
+
+def load_spy_cache(path: Path = SPY_CACHE_PATH) -> Optional[pd.DataFrame]:
+    return _load_cache(path)
