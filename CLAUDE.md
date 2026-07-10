@@ -3,6 +3,49 @@
 Guidance for Claude (and any AI assistant) working in this repo. Read this fully before
 making non-trivial changes. Ask if anything here conflicts with what the user requests.
 
+## Operating standard (read this first, applies to every task)
+
+**Rigour, discipline, accuracy — non-negotiable.** The user is deploying real money and
+reading these documents to reason about a system that governs it. A stale figure in a
+doc is a defect of the same class as a bug in the code. An unverified claim about a paid
+service is a defect that costs the user real money (this has happened in this repo — see
+`~/.claude/projects/c--Users-stuar-code-ETFTrader/memory/rule_verify_before_recommending.md`
+and `.../rule_rigour_discipline_accuracy.md`).
+
+Concrete rules — apply on every task, no exceptions:
+
+- **Full sweep on any update.** When updating a document, code file, or config to reflect
+  a change, grep the whole file (or repo) for the old value(s), old phrasing, and related
+  concepts before declaring done. When updating a section title or table entry, verify the
+  surrounding descriptive text is not now contradicted. Titles like "currently degraded"
+  or "Position count of 28 exceeds the target of 20" carry semantic weight that must be
+  updated in sync with the numbers.
+
+- **Verify before you recommend.** Do not make factual claims about external APIs, pricing
+  tiers, feature gates, or vendor capabilities from general knowledge. Verify against
+  vendor docs read this session, or an actual API probe on the current tier, or label the
+  claim as unverified. Never recommend a paid subscription or upgrade based on
+  extrapolation from "typically" or "usually".
+
+- **Test what you write against reality.** If code is committed, run the relevant pytest
+  subset. If a `.tex` doc is updated, recompile it (`pdflatex docs/*.tex`) and open the
+  PDF. If a data source is added, probe it. If a config is changed, load it through the
+  loader. Theoretical correctness is not shippable.
+
+- **The user is not the QA layer.** Every defect that reaches the user costs their trust
+  and their time. Silent partial completion is worse than reported partial completion —
+  if a task has residuals, list them explicitly. Do not gloss.
+
+- **Report what changed and what was verified.** After any non-trivial edit, list the
+  specific changes made and the specific checks that passed (grep for old values ran
+  clean, tests passed, PDF recompiled, endpoint returned 200 with expected shape).
+
+- **When in doubt on scope, do the full sweep.** The user's stated ethos is "sharp,
+  focussed and value-creating." A slow, thorough response beats a fast, sloppy one.
+  When time pressure or task ambiguity conflicts with rigour, choose rigour. If the task
+  genuinely cannot be completed rigorously in the available time, report the state and
+  ask for direction — do not ship a half-completed pass.
+
 ## What this repo is
 
 A Python 3.10+ quantitative ETF / FX trading project. Real money flows through this code

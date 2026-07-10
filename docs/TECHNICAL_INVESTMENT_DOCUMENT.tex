@@ -31,7 +31,7 @@
 \maketitle
 
 \begin{abstract}
-Long-only smart-beta ETF strategy operated against a live IB Gateway account. Selects positions from a filtered universe of $\sim$2{,}000 US-listed ETFs by ranking on a weighted geometric mean of four factors (momentum, quality, low-volatility, value). Top 20 held with exponential rank weights; 10\% trailing stops on every position; drift-triggered rebalance ($\sim$6/yr). This document is the operator's reading surface and takes precedence over marketing summaries; the code in \texttt{src/} is authoritative for behaviour, this document is authoritative for intent.
+Long-only smart-beta ETF strategy operated against a live IB Gateway account. Selects positions from a filtered universe of $\sim$5{,}000 US-listed ETFs by ranking on a weighted geometric mean of four factors (momentum, quality, low-volatility, value). Top 30 held with exponential rank weights; 10\% trailing stops on every position; drift-triggered rebalance ($\sim$6/yr). This document is the operator's reading surface and takes precedence over marketing summaries; the code in \texttt{src/} is authoritative for behaviour, this document is authoritative for intent.
 \end{abstract}
 
 \newpage
@@ -64,7 +64,7 @@ Live earnings (owner's estimate) & $\sim$13--14\% \\
 \end{tabular}
 \end{table}
 
-Position count of 28 exceeds the target of 20 --- an artefact of accumulated held positions from prior operating configurations; will normalise on the next rebalance.
+Position count of 28 sits below the new target of 30 (raised from 20 on 2026-07-10). The next rebalance will add positions to close the gap and redeploy the freed \$40k from the reduced cash reserve.
 
 \subsection{Backtest Metrics (35/30/20/15 policy, top-20, RankBased exponential)}
 
@@ -147,15 +147,19 @@ Inverse of annualised realised volatility over 60 trading days. Higher score for
 
 \textbf{Why AQR uses it:} Two reasons. First, the low-vol premium is real and persistent. Second, low-vol allocations reduce portfolio-level whipsaw, which matters more than arithmetic-mean metrics suggest in a compounding portfolio (see \S\ref{sec:weights}).
 
-\subsubsection{Value (target 15\% weight) --- currently degraded}
+\subsubsection{Value (target 15\% weight)}
 
 \begin{equation}
-\text{Value}_i = -1 \times \text{Expense Ratio}_i
+\text{Value}_i = 0.60 \cdot z(\text{DividendYield}_i) + 0.40 \cdot z(-\text{ExpenseRatio}_i)
 \end{equation}
 
-\textbf{This is not a value factor.} It is a low-fee preference. A real value factor uses fundamental multiples (P/E, P/B, dividend yield, EBITDA/EV). The current implementation was chosen for simplicity and is on the fix list at \S\ref{sec:flaws} T1.1. Until fixed, the 15\% weight allocated to value is buying almost no cross-sectional signal.
+\textbf{What each component contributes.} Dividend yield is the canonical fund-level value tilt for ETFs --- funds like SCHD, VYM, HDV, and VTV that hold value-tilted holdings publish materially higher trailing yields than growth-oriented funds like VUG, VGT, and QQQ. It is a real cross-sectional signal, not a fee preference. Expense ratio contributes the cost-efficiency component: for two funds with similar yield, the cheaper one is a better long-run compounder. Both components are $z$-score-normalised on the current cross-section before the blend.
 
-\textbf{Why AQR uses value:} It is the oldest and most-studied factor (Fama \& French 1993). Tends to work when growth and momentum break (2000--2002, 2022). Its absence here is the strategy's largest current gap.
+\textbf{Data source.} Real per-fund dividend yield is computed as $\texttt{lastDividend} / \texttt{price}$ from Financial Modeling Prep's \texttt{stable/profile} endpoint. Real per-fund expense ratio comes from the \texttt{stable/etf/info} endpoint. Both are cached weekly to \texttt{\textasciitilde/trade\_data/ETFTrader/processed/etf\_fundamentals.parquet} by \texttt{scripts/refresh\_fundamentals.py}. Rankings verified on 2026-07-10: SCHD 1.04, HDV 0.81, VYM 0.56, VTV 0.38, VOO $-0.04$, VUG $-0.39$, VGT $-0.50$, ARKK $-1.81$ --- the expected value ordering.
+
+\textbf{Residual gap.} Fund-level weighted P/E and P/B are still absent. The FMP endpoints that publish these (\texttt{key-metrics-ttm}, \texttt{ratios-ttm}) aggregate 10-K filings and return zero rows for ETFs at any subscription tier because ETFs do not file 10-Ks. Adding true weighted-average P/E would require holdings-level aggregation via \texttt{etf/holdings} (Ultimate tier) or a Morningstar-class source. Tracked as T1.1 residual in \S\ref{sec:flaws}. Current implementation delivers approximately 60\% of the intended value composite.
+
+\textbf{Why AQR uses value:} It is the oldest and most-studied factor (Fama \& French 1993). Tends to work when growth and momentum break (2000--2002, 2022). Yield-based value is a defensible, slowly-varying subset of the full academic tilt.
 
 \subsection{Factor Integration}
 
@@ -172,12 +176,12 @@ Each factor is first converted to a percentile rank in [0,1]. The integrated sco
 \begin{enumerate}[noitemsep]
     \item Score every ETF in the filtered universe.
     \item Rank descending.
-    \item Take the top 20.
-    \item Assign exponential rank weights: $w_i \propto e^{-\text{rank}_i / 20}$, normalised to sum to 1.
+    \item Take the top 30 (raised from 20 on 2026-07-10 --- see Change Log).
+    \item Assign exponential rank weights: $w_i \propto e^{-\text{rank}_i / 30}$, normalised to sum to 1.
     \item Apply weight bounds: minimum 2\%, maximum 15\%.
 \end{enumerate}
 
-Exponential weighting expresses conviction --- the top-ranked position gets meaningfully more weight than the twentieth --- while the bounds prevent single-position concentration. The alternative optimiser (\texttt{OPTIMIZER\_TYPE = "mvo"}) is available in the code but not the live default.
+Exponential weighting expresses conviction --- the top-ranked position gets meaningfully more weight than the thirtieth --- while the bounds prevent single-position concentration. The alternative optimiser (\texttt{OPTIMIZER\_TYPE = "mvo"}) is available in the code but not the live default.
 
 \subsection{Rebalancing}
 
@@ -195,7 +199,7 @@ Every entry BUY places a 10\% trailing stop, GTC, on the position. Trailing stop
 
 Entry stop-loss of 12\% (a bit wider than the trailing stop) accommodates initial-position volatility before the trailing high-water mark establishes.
 
-Cash reserve of \$70{,}000 is held unallocated. This is a static allocation, not a regime-responsive hedge.
+Cash reserve of \$30{,}000 is held unallocated (lowered from \$70{,}000 on 2026-07-10 to free capital for the widened 30-position basket). This is a static allocation, not a regime-responsive hedge; the T2.1 regime overlay in progress will replace the static reserve with a dynamic risk-off multiplier.
 
 \subsection{Explicit Assumptions}
 
@@ -261,7 +265,7 @@ Revise the weights when at least one of the following is available:
 
 \begin{itemize}[noitemsep]
     \item Backfilled history to pre-2020 that permits a non-overlapping regime comparison (2011--2015 vs 2021--2026).
-    \item A working value factor using fundamentals (P/E, P/B, dividend yield) rather than expense ratio.
+    \item A fund-level P/E or P/B signal added to the value composite (yield + expense ratio blend committed 2026-07-10 partially satisfies this; full P/E/P/B would fully satisfy).
     \item A deliberate operator-declared factor-level sentiment override, committed to \texttt{configs/etf\_smart\_beta.toml} with a dated research note.
 \end{itemize}
 
@@ -375,8 +379,8 @@ Adversarial review, tiered by impact. Items remain here until closed; closed ite
 \subsection{Tier 2 --- significant weaknesses}
 
 \begin{itemize}
-    \item \textbf{T2.1 No regime awareness.} Strategy runs identically in bull, bear, and crisis regimes. Long-only, concentrated, static 22\% cash reserve, 10\% trailing stops. No signal to de-risk in rising-VIX / breadth-collapsing environments. Fix: add SPY-vs-200d moving average and VIX overlay; when both signals point to stress, shift 100\% target equity to 60\%. Must include hysteresis and $\geq$30-day dwell time in either regime (per Principle 3).
-    \item \textbf{T2.2 Correlation blindness in top-N selection.} The integrated score picks the top 20 ETFs by factor score without checking their pairwise correlations. Current live holdings read as a broad international dividend / value / quality tilt with likely 0.6--0.8 pairwise correlations. Effective diversification is materially less than 20 positions suggests. Fix: take top 40 by score, cluster on 6-month correlations, pick top-scored representative per cluster until 20 positions filled.
+    \item \textbf{T2.1 No regime awareness.} \textbf{In progress 2026-07-10.} Strategy runs identically in bull, bear, and crisis regimes. Long-only, concentrated, static $\approx$8\% cash reserve (\$30k on \$390k NAV), 10\% trailing stops. Signal to de-risk in rising-VIX / breadth-collapsing environments is being built as \texttt{src/portfolio/regime.py} (committed, unit-tested). VIX history 2010--2026 cached via FMP \texttt{historical-price-eod/full}. Signal: SPY $>$ 200-day SMA AND VIX $<$ 25, smoothed by a 10-day hysteresis window, minimum 30-day dwell between switches. When risk-off, target equity multiplied by 0.60 (cash rises to $\approx$40\% of NAV). Backtest across the 2010--2026 regime record is the next step before the overlay is enabled live.
+    \item \textbf{T2.2 Correlation blindness in top-N selection.} The integrated score picks the top 30 ETFs by factor score without checking their pairwise correlations. Current live holdings read as a broad international dividend / value / quality tilt with likely 0.6--0.8 pairwise correlations. Effective diversification is materially less than 30 positions suggests. Fix: take top 60 by score, cluster on 6-month correlations, pick top-scored representative per cluster until 30 positions filled. FMP \texttt{etf/info} sector data (newly available on Premium) enables a sector-aware variant of the clustering. Design note at \texttt{docs/research/2026-07\_correlation\_clustering\_design.md}.
     \item \textbf{T2.3 Conviction magnitude discarded.} The integrated score's magnitude (0.95 vs 0.62) is not used in the optimiser; only rank order matters. Exponential rank weighting mitigates partially. Fix: pass score magnitude as expected-return alpha to the optimiser.
 \end{itemize}
 
@@ -384,17 +388,17 @@ Adversarial review, tiered by impact. Items remain here until closed; closed ite
 
 \begin{itemize}
     \item \textbf{T3.1 Factor lookback windows are convention.} 252 / 21 / 60 chosen by AQR convention, never tested for optimality in this universe.
-    \item \textbf{T3.2 Risk parameters are round numbers.} 10\%, 12\%, \$70k, 5\% drift, 2--15\% weight bounds --- all defensible, all uncalibrated. Sensitivity grid would locate them on the risk-return frontier.
+    \item \textbf{T3.2 Risk parameters are round numbers.} 10\%, 12\%, \$30k, 5\% drift, 2--15\% weight bounds --- all defensible, all uncalibrated. Sensitivity grid would locate them on the risk-return frontier.
     \item \textbf{T3.3 Rebalance frequency untested.} Bimonthly vs quarterly turnover trade-off never explicitly measured on this universe.
 \end{itemize}
 
 \subsection{Priority Order}
 
 \begin{enumerate}[noitemsep]
-    \item T1.3 (look-ahead pinning test) --- 2 hours. Proves the model is not silently a lie.
-    \item T1.1 (real value factor) --- 1--2 evenings. Single highest-impact fix.
-    \item T2.1 (regime overlay) --- 1 evening. Drawdown protection before live orders resume.
-    \item T2.2 (correlation clustering) --- 1 evening. Effective diversification.
+    \item T2.1 (regime overlay) --- \textbf{in progress}. Module and unit tests committed 2026-07-10; backtest across 2010--2026 pending. Drawdown protection before live orders resume.
+    \item T2.2 (correlation clustering) --- \textbf{next}. Effective diversification; will use FMP sector data for a sector-aware variant.
+    \item T1.3 (look-ahead pinning test) --- 2 hours. Proves the model is not silently a lie. Do before enabling any of the above live.
+    \item T1.1 residual (fund-level P/E / P/B) --- deferred. Requires FMP Ultimate tier holdings aggregation or a Morningstar-class source. Review after 3--6 months of live experience with the yield + expense-ratio blend.
     \item T1.2 (survivorship haircut) --- 1 hour. Honesty in reporting.
     \item T2.3, T3.\* --- as time permits.
 \end{enumerate}
