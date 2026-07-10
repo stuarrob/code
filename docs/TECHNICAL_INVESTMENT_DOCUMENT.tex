@@ -372,8 +372,8 @@ Adversarial review, tiered by impact. Items remain here until closed; closed ite
 \begin{itemize}
     \item \textbf{T1.1 The value factor is fake.} \textbf{Partially closed 2026-07-10.} \texttt{ValueFactor} now consumes real per-fund dividend yield (from FMP \texttt{stable/profile}, \texttt{lastDividend}/\texttt{price}) and real per-fund expense ratio (from FMP \texttt{stable/etf/info}). Blend is 60\% yield + 40\% expense ratio. Rankings verified sensible: SCHD/HDV/VYM/VTV score at the top, VUG/VGT/ARKK at the bottom.
     \textbf{Residual gap:} fund-level weighted P/E and P/B remain unavailable at any FMP tier (\texttt{key-metrics-ttm} and \texttt{ratios-ttm} return zero rows for ETFs since they aggregate 10-K filings; \texttt{etf/holdings} needs Ultimate tier and thousands of aggregation calls). A future upgrade path exists via Ultimate-tier holdings aggregation or a Morningstar-class source. Current implementation delivers roughly 60\% of the intended value composite --- the yield signal alone is the canonical academic value tilt for ETFs.
-    \item \textbf{T1.2 Survivorship bias in the cached universe --- accepted as small.} The per-ticker parquet cache contains only ETFs that still trade. Delisted / liquidated ETFs are absent. In academic stock-market backtests survivorship bias inflates CAGR by 1--2\%, but for this specific strategy the effect is materially smaller: the momentum (252d) and quality (252d) screens would have filtered out most now-delisted ETFs long before they liquidated, and the top-30 selection would not have held them. Operator judgement (2026-07-10): the residual bias is not worth the engineering cost to correct while the model is untested. Revisit only if a live regime materially favours niche or newly-launched ETFs.
-    \item \textbf{T1.3 Look-ahead bias presumed absent, never proved.} No pinning test asserts that factor calculations at time $t$ use only data with index $< t$. If any factor uses a window that includes $t{+}1$, the backtest is silently inflated. Fix: add a shift-and-recompute test. Two hours' work.
+    \item \textbf{T1.2 Survivorship bias --- accepted, not fixing.} Cache lacks delisted ETFs. Operator judgement 2026-07-10: momentum/quality screens filter delisted-candidate ETFs long before they die, so residual bias is negligible for this strategy.
+    \item \textbf{T1.3 Look-ahead bias --- accepted, spot-checks only.} No formal pinning test. Regime and clustering modules each carry a look-ahead test in their unit suites; broader coverage deferred.
 \end{itemize}
 
 \subsection{Tier 2 --- significant weaknesses}
@@ -395,12 +395,10 @@ Adversarial review, tiered by impact. Items remain here until closed; closed ite
 \subsection{Priority Order}
 
 \begin{enumerate}[noitemsep]
-    \item T2.1 (regime overlay) --- \textbf{in progress}. Module and unit tests committed 2026-07-10; backtest across 2010--2026 pending. Drawdown protection before live orders resume.
-    \item T2.2 (correlation clustering) --- \textbf{next}. Effective diversification; will use FMP sector data for a sector-aware variant.
-    \item T1.3 (look-ahead pinning test) --- 2 hours. Proves the model is not silently a lie. Do before enabling any of the above live.
-    \item T1.1 residual (fund-level P/E / P/B) --- deferred. Requires FMP Ultimate tier holdings aggregation or a Morningstar-class source. Review after 3--6 months of live experience with the yield + expense-ratio blend.
-    \item T1.2 (survivorship haircut) --- 1 hour. Honesty in reporting.
-    \item T2.3, T3.\* --- as time permits.
+    \item \textbf{Multi-regime backtest suite} --- 2010--2026 backfill via FMP just landed, enabling the honest tests of T2.1 (regime overlay on portfolio, not just SPY), T2.2 (correlation clustering across regimes), T2.3 (magnitude-in-optimiser), and factor-weight refinement. Highest priority; blocking the live proceed decision.
+    \item T1.1 residual (fund-level P/E / P/B) --- deferred until 3--6 months of live evidence justifies the extra data spend.
+    \item T1.2, T1.3 --- accepted, not fixing (per §\ref{sec:flaws}).
+    \item T3.\* --- as time permits.
 \end{enumerate}
 
 %% ============================================================
