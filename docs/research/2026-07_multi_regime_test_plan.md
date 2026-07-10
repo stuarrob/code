@@ -30,19 +30,27 @@ Rerun the current 35/30/20/15 policy on the 2010-2026 backfill. This is the anch
 **Metrics reported:** CAGR, Vol, Sharpe, Sortino, MaxDD, monthly hit-rate, turnover. Two windows: full 2011-01-01 → 2026-07-09 and trailing 5-year.
 **Time:** ~10 minutes runtime, once the backfill is in.
 
-### Test 2 — Factor weight grid (question A)
+### Test 2 — Factor weight defence (question A)
 
-Grid search over the 3-factor simplex (momentum, quality, low-vol; value included via the new real yield+ER blend):
+**Reframed 2026-07-10 per operator directive: this is a validation of the 35/30/20/15 prior, not a search for a replacement.** The goal is to demonstrate that the prior is defensible, understand where and why it might be sub-optimal, and produce a written defence that a serious reviewer would accept.
 
-- **Grid resolution:** 10% steps on each factor. Weights sum to 1.0. Value fixed at {0.10, 0.15, 0.20} to keep the grid tractable.
-- Approximately 45 configurations.
-- Full-period + 5-year + 3-year windows.
-- **Robustness score:** min-Sharpe across the three windows (a config that wins one window and loses two is not a robust choice).
+**Structure (four sub-tests, each answers a specific critique of the prior):**
 
-Deliverables:
-- CSV of all configurations with metrics per window
-- Heatmap plots (momentum × quality) for each value weight
-- Explicit comparison: does the empirical grid winner beat the 35/30/20/15 prior on min-Sharpe? If yes by more than 0.10 Sharpe, propose a weight change with a research note. If no, the prior stands and this is the note.
+**2a. Local stability around the prior.** Vary each factor's weight by $\pm 5$\% and $\pm 10$\% relative, holding the others proportional. Question answered: "if the prior is a knife-edge, small perturbations should collapse the performance." A defensible prior shows a broad, gentle plateau — small perturbations produce small metric changes across all three windows.
+
+**2b. Concentration stress-test.** Test the three single-factor concentrations (momentum 70\% / quality 70\% / low-vol 70\%, others residual). Question answered: "am I under-weighting the strongest single factor?" A defensible multi-factor prior beats each concentration on drawdown-adjusted return, even if a concentration wins raw CAGR in one window.
+
+**2c. Empirical-winner-vs-prior contrast.** Identify the in-sample-optimal weight vector on each of the three windows independently. Question answered: "would tuning to any one window meaningfully help?" A defensible prior sits near the average of the three winners AND survives the min-Sharpe robustness test against them.
+
+**2d. Non-ergodicity check.** Compute the time-average log-return (geometric mean) rather than the arithmetic-mean CAGR for each of {prior, single-factor concentrations, in-sample winners}. Question answered: "does the ergodicity-based defence of the prior actually hold?" A defensible prior wins the time-average metric more often than the arithmetic-mean metric.
+
+**Deliverables:**
+- Table showing the prior's metrics on 3 windows next to nearby-variant metrics
+- Plot showing the local performance plateau around 35/30/20/15
+- A written defence section in the results doc explaining, in prose, WHY these weights are appropriate given: (i) AQR canonical evidence, (ii) non-ergodicity of log-space compounding, (iii) insurance-premium interpretation of quality + low-vol, (iv) slowly-varying design principle.
+- Explicit statement: "the prior is retained" is the default outcome. A weight change is proposed only if a robust alternative beats the prior on min-Sharpe by $\geq 0.10$ across all three windows AND survives the time-average check.
+
+**Runtime with multiprocessing:** 45 configs × 3 windows over the cached rolling scores $\approx$ 135 evaluations. With 4-worker pool: 5--8 minutes. Sequential would be 20--30 minutes.
 
 ### Test 3 — Regime overlay on the smart-beta portfolio (question B)
 
@@ -81,20 +89,37 @@ Report only whether it changes the answer materially — if <10 bps of CAGR move
 - **Not a rebalance-frequency sensitivity.** The bimonthly cadence is a policy input, tested separately if T3.3 comes up in the queue.
 - **Not a survivorship-corrected backtest.** T1.2 accepted as small; not fixing.
 
-## Execution plan
+## Execution plan (parallelised)
 
 Once the FMP backfill notification lands:
 
-1. Recompute rolling factor scores on the extended universe (`scripts/factor_weight_diagnostic.py` refresh cache).
-2. Run Test 1 (baseline restatement) — 10 min.
-3. Run Test 2 (weight grid) — ~2–3 hours.
-4. Run Test 3 (regime overlay) — ~1 hour.
-5. Run Test 4 (clustering) — ~30 min.
-6. Run Test 5 (combined) — ~30 min.
-7. Optional Test 6 (magnitude) — 30 min.
-8. Publish `docs/research/2026-07_multi_regime_results.md` consolidating all findings, with explicit recommendations against the two questions (A/B) and per-verdict-criterion decisions.
+**Phase 1 — sequential prerequisite (~5 min)**
 
-Total: an evening of runtime + a morning of interpretation and doc write-up.
+Recompute rolling factor scores on the extended universe once. This is the shared input to every subsequent test and cannot be parallelised without duplicating work. Cached to `~/trade_data/ETFTrader/processed/rolling_factor_scores.parquet` under a fresh source-hash so downstream tests reuse it.
+
+**Phase 2 — parallel test bank (~15 min wall clock)**
+
+Tests 2, 3, 4, 6 all consume the same cached rolling scores and produce independent outputs. Run each as its own process, each using a `multiprocessing.Pool` internally to parallelise its own grid over the local CPU pool. Split as follows on a typical 8-core machine:
+
+| Test | Own process | Internal workers | Est. wall-clock |
+|---|---|---|---|
+| Test 1 (baseline) | 1 | 1 (single config) | 30 sec |
+| Test 2 (defence grid) | 1 | 4 workers × 45 configs × 3 windows | 5-8 min |
+| Test 3 (regime sensitivity) | 1 | 3 workers × 9 configs | 3-4 min |
+| Test 4 (clustering) | 1 | 3 workers × 5 configs × 2 variants | 3-4 min |
+| Test 6 (magnitude, if run) | 1 | 1 (single A/B) | 1-2 min |
+
+Phase 2 uses ~11 concurrent workers total; on an 8-core box this is fine because the workload is CPU-bound but each config completes in seconds — over-subscription is not a bottleneck.
+
+**Phase 3 — sequential synthesis (~3 min)**
+
+Test 5 (combined best-of) depends on outputs from tests 2/3/4. Run after Phase 2 completes.
+
+**Phase 4 — write-up (~30-60 min)**
+
+Publish `docs/research/2026-07_multi_regime_results.md` — the polished deliverable. Structure documented under "Reporting shape" below. Written as a serious research note, not a data dump: headline stats prominent, prose explains WHY each result matters, explicit constructive critique of the prior in Test 2's section.
+
+**Total wall-clock:** ~25-30 minutes of compute + write-up time.
 
 ## Reporting shape
 
