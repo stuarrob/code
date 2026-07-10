@@ -77,14 +77,22 @@ def narrate_proposal(proposal: TradeProposal,
     sells = [t for t in proposal.trades if t.action == ACTION_SELL]
     extends = [t for t in proposal.trades if t.action == ACTION_EXTEND]
 
-    # 1. Headline — one line
+    # Streamlit's markdown treats `$...$` as inline math. Every dollar
+    # amount must be escaped as `\$` so it renders as a literal dollar.
+    def _dollar(amount: float, precision: int = 0) -> str:
+        return f"\\${amount:,.{precision}f}"
+
+    def _k(amount: float) -> str:
+        return f"\\${amount/1000:.0f}k"
+
+    # 1. Headline
+    cost_bps = proposal.total_est_cost / max(proposal.turnover_notional, 1) * 10_000
     lines = [
         f"**{n_trades} trades: {len(buys)} buy · {len(sells)} sell · "
         f"{len(extends)} extend.** "
-        f"Turnover **${proposal.turnover_notional:,.0f}** "
+        f"Turnover **{_dollar(proposal.turnover_notional)}** "
         f"({proposal.turnover_pct_of_nav:.0%} NAV), cost "
-        f"**${proposal.total_est_cost:,.0f}** "
-        f"({proposal.total_est_cost / max(proposal.turnover_notional, 1) * 10_000:.1f} bps). "
+        f"**{_dollar(proposal.total_est_cost)}** ({cost_bps:.1f} bps). "
         f"Ends with **{proposal.n_positions_after}** positions."
     ]
 
@@ -96,38 +104,32 @@ def narrate_proposal(proposal: TradeProposal,
             by_geo: dict[str, float] = {}
             for t in incoming:
                 m = metadata.get(t.ticker)
-                geo = m.geography if m and m.geography else "Unknown"
+                geo = m.geography if m and m.geography else "Uncategorised"
                 by_geo[geo] = by_geo.get(geo, 0.0) + t.delta_notional
             top_geo = sorted(by_geo.items(), key=lambda kv: -kv[1])[:4]
-            geo_str = ", ".join(
-                f"{g} ${v/1000:.0f}k" for g, v in top_geo
-            )
+            geo_str = ", ".join(f"{g} {_k(v)}" for g, v in top_geo)
             lines.append(f"**Buying into:** {geo_str}.")
         else:
             top_buys = sorted(incoming, key=lambda x: -x.delta_notional)[:4]
             lines.append(
                 f"**Top buys:** " +
-                ", ".join(
-                    f"{t.ticker} ${t.delta_notional/1000:.0f}k"
-                    for t in top_buys
-                ) + "."
+                ", ".join(f"{t.ticker} {_k(t.delta_notional)}" for t in top_buys)
+                + "."
             )
 
-    # 3. Selling out of — top few
+    # 3. Selling out of — top few (geography label only when known)
     if sells:
         lines.append("")
         top_sells = sorted(sells, key=lambda x: -x.delta_notional)[:4]
-        if metadata:
-            sell_str = ", ".join(
-                f"{t.ticker} ({metadata[t.ticker].geography or '?'}) "
-                f"${t.delta_notional/1000:.0f}k"
-                for t in top_sells if t.ticker in metadata
-            )
-        else:
-            sell_str = ", ".join(
-                f"{t.ticker} ${t.delta_notional/1000:.0f}k" for t in top_sells
-            )
-        lines.append(f"**Selling out of:** {sell_str}.")
+        parts: list[str] = []
+        for t in top_sells:
+            m = metadata.get(t.ticker) if metadata else None
+            geo = m.geography if m and m.geography else None
+            if geo:
+                parts.append(f"{t.ticker} ({geo}) {_k(t.delta_notional)}")
+            else:
+                parts.append(f"{t.ticker} {_k(t.delta_notional)}")
+        lines.append(f"**Selling out of:** {', '.join(parts)}.")
 
     # 4. Factor tilt — one line, only significant deltas
     if proposal.factor_exposures:
@@ -143,16 +145,18 @@ def narrate_proposal(proposal: TradeProposal,
             lines.append("")
             lines.append(f"**Factor tilt:** {' · '.join(tilts)}.")
 
-    # 5. Cash + warnings — one line each if present
+    # 5. Cash + warnings
     lines.append("")
     lines.append(
-        f"**Cash after:** ${proposal.cash_after:,.0f} "
+        f"**Cash after:** {_dollar(proposal.cash_after)} "
         f"(reserve target: policy-set)."
     )
     if proposal.warnings:
         lines.append("")
-        lines.append(f"**⚠ {len(proposal.warnings)} warning(s).** "
-                     f"First: {proposal.warnings[0]}")
+        lines.append(
+            f"**⚠ {len(proposal.warnings)} warning(s).** "
+            f"First: {proposal.warnings[0]}"
+        )
 
     return "\n".join(lines)
 
@@ -188,9 +192,11 @@ def _proposal_to_dict(proposal: TradeProposal) -> dict:
     }
 
 
-_SYSTEM_PROMPT = """You are the narrator for a deterministic ETF smart-beta trading applet operated against a live account.
+_SYSTEM_PROMPT = r"""You are the narrator for a deterministic ETF smart-beta trading applet operated against a live account.
 
 STRICT LENGTH: ≤ 4 short paragraphs, ≤ 200 words total. The operator reads this on-screen at rebalance time. Longer is worse.
+
+MARKDOWN RENDERING RULE (critical): the output is rendered by Streamlit's markdown engine, which treats `$...$` as inline LaTeX math. Every literal dollar sign in your output MUST be escaped as `\$` (backslash-dollar). For example write `\$148k` not `$148k`. Do NOT wrap numbers in `$...$`. Do NOT use markdown math. Only plain text with escaped dollars.
 
 STRUCTURE the initial narration as:
   1) One sentence — WHAT the portfolio is moving into (geography / asset-class shift).
@@ -275,7 +281,31 @@ def narrate_with_claude(
         messages=[{"role": "user", "content": prompt}],
     )
     parts = [block.text for block in resp.content if hasattr(block, "text")]
-    return "\n\n".join(parts).strip()
+    text = "\n\n".join(parts).strip()
+    return _escape_streamlit_dollars(text)
+
+
+def _escape_streamlit_dollars(text: str) -> str:
+    """Escape any unescaped `$` so Streamlit's markdown does not treat it as
+    inline LaTeX math. Idempotent — running twice does not double-escape.
+
+    Also strips known math-mode wrappers Claude sometimes emits despite
+    the system prompt: `\$X$` or `$X$` around dollar amounts.
+    """
+    import re
+    # First, unwrap any `$...$` blocks that look like they contain a
+    # numeric literal (dollar amount) — these are almost always Claude
+    # or the deterministic path leaking math mode.
+    # Match: "$" then anything not "$" then "$" — only if the payload
+    # starts with a digit or word char + digits (heuristic for numbers).
+    text = re.sub(
+        r"\$([\w\d,\.\s\(\)]+?)\$",
+        lambda m: m.group(1) if any(ch.isdigit() for ch in m.group(1)) else m.group(0),
+        text,
+    )
+    # Now escape any remaining raw `$` that is NOT already `\$`.
+    text = re.sub(r"(?<!\\)\$", r"\\$", text)
+    return text
 
 
 def _json_dump(payload: dict) -> str:

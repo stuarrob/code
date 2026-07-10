@@ -1013,9 +1013,11 @@ with tab_explain:
             c1, c2 = st.columns([1, 3])
             with c1:
                 model = st.text_input(
-                    "Model", value=DEFAULT_ANTHROPIC_MODEL,
-                    help="Anthropic model ID. Default is a good balance of "
-                         "quality and cost for narration.",
+                    "Model",
+                    value=DEFAULT_ANTHROPIC_MODEL,
+                    key="anthropic_model_input",  # scoped so DEFAULT bumps reflect on reload
+                    help="Anthropic model ID. Default is the latest Opus "
+                         "verified against your API key.",
                 )
                 if st.button("Generate LLM narration", type="primary"):
                     with st.spinner("Claude is reading the proposal…"):
