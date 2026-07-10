@@ -14,7 +14,7 @@ version = 1
 tax_status = "taxable"  # taxable | tax_advantaged | retirement
 
 [portfolio]
-num_positions = 20
+num_positions = 30
 min_weight = 0.02  # 2% floor per position
 max_weight = 0.15  # 15% ceiling per position
 
@@ -40,7 +40,7 @@ drift_threshold = 0.05   # Rebalance when any weight drifts > 5% from target.
 [risk]
 entry_stop_loss_pct = 0.12  # Fixed stop 12% below entry.
 trailing_stop_pct = 0.10    # Trailing stop 10% below the high-water mark.
-cash_reserve = 70000        # USD kept unallocated at all times.
+cash_reserve = 30000        # USD kept unallocated at all times.
 
 [optimizer]
 risk_aversion = 1.5       # Mean-variance risk-aversion coefficient.

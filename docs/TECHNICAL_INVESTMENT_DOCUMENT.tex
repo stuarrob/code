@@ -274,11 +274,11 @@ Revise the weights when at least one of the following is available:
 \toprule
 \textbf{Parameter} & \textbf{Value} & \textbf{Justification} \\
 \midrule
-\texttt{num\_positions} & 20 &
-Target holding count. Prior operating configurations without a fixed target produced degenerate 1--2 position portfolios when factor scores were bimodal; the fixed target of 20 forces diversification. \\
+\texttt{num\_positions} & 30 &
+Target holding count. Prior operating configurations without a fixed target produced degenerate 1--2 position portfolios when factor scores were bimodal; the fixed target forces diversification. Raised from 20 to 30 on 2026-07-10 to spread capital more thinly across the top-ranked cohort and reduce single-name idiosyncratic risk in a sideways market. \\
 
 \texttt{min\_weight} & 2\% &
-Position floor. Ensures a full-basket portfolio uses at most 40\% of NAV at floor, leaving room for over-weight tilt on high-conviction positions. \\
+Position floor. At 30 positions the full basket uses 60\% of NAV at floor, leaving 40\% for over-weight tilts on high-conviction positions. \\
 
 \texttt{max\_weight} & 15\% &
 Position cap. Prevents single-position concentration under the RankBased scheme; the top-ranked ETF cannot receive more than 15\% of NAV. \\
@@ -333,7 +333,7 @@ Drift threshold & 5\% & Round number, defensible per Donohue--Yip (2003). Wideni
 \midrule
 Entry stop-loss & 12\% & Slightly wider than trailing stop to accommodate initial position volatility. \\
 Trailing stop & 10\% & Sized to sit above ordinary noise ($\approx$2--3$\sigma$ daily) so it triggers only on genuine trend breaks. \\
-Cash reserve & \$70{,}000 & $\approx$18\% of current NAV. Static, not regime-responsive. Fix on the list (\S\ref{sec:flaws} T2.1). \\
+Cash reserve & \$30{,}000 & Lowered from \$70k to \$30k on 2026-07-10. Roughly 8\% of current NAV; freed \$40k for redeployment into the 30-position basket. Static, not regime-responsive --- fix on the list (\S\ref{sec:flaws} T2.1). \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -404,6 +404,10 @@ Adversarial review, tiered by impact. Items remain here until closed; closed ite
 %% ============================================================
 
 Chronological, most recent first. Each entry cites the closing commit SHA(s). Every commit touching \texttt{configs/etf\_smart\_beta.toml}, \texttt{src/factors/}, \texttt{src/portfolio/}, or the execution scripts must append an entry.
+
+\subsection*{2026-07-10 --- Position count 20$\rightarrow$30, cash reserve \$70k$\rightarrow$\$30k}
+
+Operator directive following observation that the current 20-name basket has been drifting sideways with the market: raise \texttt{num\_positions} to 30 and lower \texttt{cash\_reserve} to \$30{,}000 in \texttt{configs/etf\_smart\_beta.toml}. Rationale: spread capital more thinly across the ranked top-cohort to reduce single-name idiosyncratic drag, and free approximately \$40k of dormant cash for redeployment. Passes the slowly-varying filter (parameter change, not signal change) and preserves the design invariants (30 $\times$ 2\% floor = 60\% $<$ 100\%; ranking and scoring logic untouched). Related open item: T2.2 correlation clustering --- with a wider basket the marginal decorrelation benefit from clustering is expected to fall, and the experiment should quantify this.
 
 \subsection*{2026-07-10 --- Full rewrite}
 
