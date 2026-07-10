@@ -38,6 +38,94 @@ DEFAULT_IB_CLIENT_ID = 30  # Reserved for the applet — avoids collision with
                             # existing scripts using 1/2/5/6/7/15/16/20/22.
 DEFAULT_IB_TIMEOUT = 10
 
+DEFAULT_PRICE_CACHE_DIR = Path.home() / "trade_data" / "ETFTrader" / "ib_historical"
+
+
+def back_project_equity_curve(
+    snapshot: "IBSnapshot",
+    days: int = 365,
+    price_cache_dir: Path = DEFAULT_PRICE_CACHE_DIR,
+    hold_cash_flat: bool = True,
+) -> pd.DataFrame:
+    """Back-project the value of the CURRENT book over the last `days`.
+
+    Takes today's positions (shares per ticker) and multiplies by the
+    historical close of each ticker. Cash is held at today's balance
+    (`hold_cash_flat=True`) since we do not track historical cash flow
+    changes locally.
+
+    This ignores:
+      - trades made during the window (turnover)
+      - cash contributions / withdrawals
+      - dividends (unless already reflected in the price series)
+
+    So the curve is NOT actual equity — it's the trajectory the CURRENT
+    portfolio would have shown if held unchanged for the window.
+    Useful for judging "did the book I hold now grow or drift sideways?"
+    Not useful for real P&L attribution.
+
+    Args:
+        snapshot: the live IB snapshot with `positions` populated.
+        days: how far back to project. 365 = one year.
+        price_cache_dir: where the per-ticker parquets live.
+        hold_cash_flat: if True, cash contribution is a flat line at
+            `snapshot.cash`. Otherwise cash is excluded.
+
+    Returns:
+        DataFrame indexed by date (DatetimeIndex, ascending) with columns
+        `book_value`, `cash`, `total`. Empty DataFrame if no price
+        coverage.
+    """
+    positions = list(snapshot.long_positions)
+    if not positions:
+        return pd.DataFrame(columns=["book_value", "cash", "total"])
+
+    end_date = pd.Timestamp(snapshot.timestamp).normalize()
+    start_date = end_date - pd.Timedelta(days=days)
+
+    frames: dict[str, pd.Series] = {}
+    shares: dict[str, float] = {}
+    for pos in positions:
+        parquet = price_cache_dir / f"{pos.ticker}.parquet"
+        if not parquet.exists():
+            continue
+        try:
+            df = pd.read_parquet(parquet, columns=["close"])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"back_project_equity_curve: {pos.ticker}: {exc}")
+            continue
+        # Trim to window; keep only up to end_date.
+        df = df[(df.index >= start_date) & (df.index <= end_date)]
+        if df.empty:
+            continue
+        frames[pos.ticker] = df["close"]
+        shares[pos.ticker] = pos.shares
+
+    if not frames:
+        return pd.DataFrame(columns=["book_value", "cash", "total"])
+
+    prices = pd.DataFrame(frames).ffill()
+    # For each date compute dollar value = shares * price.
+    values = pd.DataFrame(
+        {t: prices[t].reindex(prices.index) * shares[t] for t in prices.columns}
+    )
+    book_value = values.sum(axis=1)
+    cash = pd.Series(
+        float(snapshot.cash) if hold_cash_flat else 0.0,
+        index=book_value.index,
+        name="cash",
+    )
+    total = book_value + cash
+    out = pd.DataFrame({
+        "book_value": book_value,
+        "cash": cash,
+        "total": total,
+    })
+    # Drop any dates before the earliest ticker had a price — otherwise
+    # book_value starts from zero and jumps.
+    out = out.dropna(how="any")
+    return out
+
 DEFAULT_NAV_HISTORY_PATH = (
     Path.home() / "trade_data" / "ETFTrader" / "nav_history.parquet"
 )

@@ -28,6 +28,7 @@ from src.portfolio.ib_state import (
     DEFAULT_IB_PORT,
     DEFAULT_NAV_HISTORY_PATH,
     append_nav_snapshot,
+    back_project_equity_curve,
     connect_read_only,
     fetch_snapshot,
     load_nav_history,
@@ -39,9 +40,9 @@ from src.portfolio.pipeline import (
     optimize_portfolio,
     portfolio_hhi,
     portfolio_volatility,
-    refresh_prices_from_ib,
     score_factors,
 )
+import sys  # noqa: E402 — needed for the FMP-refresh subprocess in Step 2
 from src.portfolio.policy import DEFAULT_POLICY_PATH, load_policy
 from src.portfolio.proposal import (
     ACTION_BUY, ACTION_EXTEND, ACTION_SELL,
@@ -329,18 +330,63 @@ with tab_setup:
             f"`Realized`/`Unrealized` from `accountSummary`)."
         )
 
-        st.subheader("Equity curve (local snapshots)")
-        hist = st.session_state.get("nav_history")
-        if hist is None:
-            hist = load_nav_history()
-        if hist.empty or len(hist) < 2:
+        st.subheader("Equity curve — current book, back-projected")
+
+        ec1, ec2 = st.columns([1, 4])
+        with ec1:
+            window_label = st.selectbox(
+                "Window",
+                options=["3 months", "6 months", "1 year", "2 years"],
+                index=2,
+            )
+            window_days = {
+                "3 months": 90, "6 months": 180,
+                "1 year": 365, "2 years": 730,
+            }[window_label]
+        with ec2:
             st.caption(
-                f"Only {len(hist)} snapshot(s) so far — the curve will build "
-                f"as you run the applet on subsequent days. Stored at "
-                f"`{DEFAULT_NAV_HISTORY_PATH}`."
+                "Value of the **currently-held** positions, back-projected "
+                "using historical prices for those tickers × today's share "
+                "counts, plus today's cash held flat. Ignores past trades "
+                "and cash flow changes — so this is *not* actual P&L, it "
+                "is the trajectory the book you hold **now** would have "
+                "shown if held unchanged. Useful for judging whether the "
+                "current basket has grown or drifted sideways."
+            )
+
+        try:
+            curve = back_project_equity_curve(snap, days=window_days)
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Back-projection failed: {exc}")
+            curve = None
+
+        if curve is None or curve.empty:
+            st.info(
+                "Could not build the curve — no historical prices in the "
+                "cache for the held tickers. Refresh the price cache in "
+                "tab 2 and try again."
             )
         else:
-            st.line_chart(hist[["nav", "cash"]])
+            # Show the total line as the primary chart, plus a compact
+            # summary of start/end/delta.
+            start_val = float(curve["total"].iloc[0])
+            end_val = float(curve["total"].iloc[-1])
+            delta_pct = (end_val / start_val - 1.0) if start_val > 0 else float("nan")
+            days_covered = (curve.index[-1] - curve.index[0]).days
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Start", f"${start_val:,.0f}")
+            m2.metric("End", f"${end_val:,.0f}")
+            m3.metric("Change", f"${end_val - start_val:,.0f}",
+                      f"{delta_pct:+.1%}" if delta_pct == delta_pct else "—")
+            m4.metric("Days covered", f"{days_covered}")
+
+            st.line_chart(curve[["total", "book_value", "cash"]])
+            st.caption(
+                f"Chart shows total, book value (positions × price), and "
+                f"cash (flat at today's ${snap.cash:,.0f}). {days_covered} "
+                f"trading days plotted."
+            )
 
         pos_col, ord_col = st.columns(2)
         with pos_col:
@@ -380,14 +426,13 @@ with tab_setup:
 
 
 with tab_collect:
-    st.header("Step 2 — collect ETF prices")
+    st.header("Step 2 — load ETF price matrix")
     st.markdown(
-        f"Loads the ETF price matrix from "
-        f"`{DEFAULT_PROCESSED_DIR}` and applies the quality filter "
-        f"(min {policy.factor_lookbacks.momentum} days of history, "
-        f"less than 10% missing bars). Priority order: Databento → IB → yfinance. "
-        f"The daily cron keeps this current — refresh from IB Gateway "
-        f"on-demand if you need fresh data right now."
+        f"Loads the ETF price matrix from `{DEFAULT_PROCESSED_DIR}` and "
+        f"applies the quality filter (min {policy.factor_lookbacks.momentum} "
+        f"days of history, less than 10% missing bars). The cache is kept "
+        f"current by the weekly FMP refresh cron (see "
+        f"`docs/WINDOWS_AUTOMATION.md`) — no live IB fetch needed here."
     )
 
     # ── Cache status ────────────────────────────────────────
@@ -410,7 +455,7 @@ with tab_collect:
                 f"per-ticker files under `{DEFAULT_IB_CACHE_DIR}`"
             )
 
-    # ── Config + actions ─────────────────────────────────────
+    # ── Config + optional manual refresh ─────────────────────
     ac1, ac2 = st.columns([2, 1])
     with ac1:
         processed_dir = st.text_input(
@@ -418,79 +463,50 @@ with tab_collect:
             help="Directory containing etf_prices_{db,ib,filtered}.parquet",
         )
     with ac2:
-        refresh_from_ib = st.checkbox(
-            "Refresh from IB before load",
+        refresh_from_fmp = st.checkbox(
+            "Refresh from FMP before load",
             value=False,
             help=(
-                "Runs IBDataCollector against IB Gateway (client_id 31). "
-                "Skips tickers already current; only stale/missing incur an "
-                "IB request. A fully-current cache costs seconds; a stale "
-                "cache costs minutes; a missing cache costs hours."
+                "Runs the FMP price top-up before loading (calls "
+                "scripts/backfill_prices_fmp.py). For tickers already "
+                "backfilled, only fetches new bars since the last cached "
+                "date — a few minutes at most. Useful if you want the "
+                "latest close before running the model."
             ),
         )
 
-    if st.button("Load / refresh price matrix", type="primary"):
-        # Optional IB refresh first.
-        if refresh_from_ib:
-            import time as _time
-
-            work = (status or {}).get("n_stale", 0) + (status or {}).get("n_missing", 0)
-            # IB rate-limit safe interval is 12s/request; back-of-envelope
-            # ETA is 12s * work, but the collector spends ~1s of that on
-            # bookkeeping so real-world tends to be ~13-14s.
-            est_seconds = work * 13
-            est_finish = pd.Timestamp.now() + pd.Timedelta(seconds=est_seconds)
-            hrs, rem = divmod(est_seconds, 3600)
-            mins = rem // 60
-            st.info(
-                f"Refreshing **{work:,} tickers** — estimated **{int(hrs)}h "
-                f"{int(mins)}m**, done around **{est_finish:%H:%M}** "
-                f"(local time). You can leave this browser tab open; the "
-                f"process runs server-side and picks back up if the "
-                f"connection is stable."
-            )
-            with st.status(
-                f"Refreshing {work} tickers from IB Gateway…",
-                expanded=True,
-            ) as status_box:
-                progress = st.progress(0.0)
-                progress_label = st.empty()
-                _t0 = _time.monotonic()
-
-                def _cb(i: int, total: int, ticker: str):
-                    progress.progress(min(i / max(total, 1), 1.0))
-                    elapsed = _time.monotonic() - _t0
-                    if i > 0:
-                        per = elapsed / i
-                        remaining_secs = per * (total - i)
-                        eta_h, r = divmod(int(remaining_secs), 3600)
-                        eta_m, _ = divmod(r, 60)
-                        eta_txt = (
-                            f"ETA {eta_h}h {eta_m:02d}m"
-                            if eta_h else f"ETA {eta_m}m"
-                        )
-                    else:
-                        eta_txt = "warming up…"
-                    progress_label.markdown(
-                        f"`{i:,}/{total:,}` · {ticker} · {eta_txt}"
-                    )
-
+    if st.button("Load price matrix", type="primary"):
+        # Optional FMP refresh first.
+        if refresh_from_fmp:
+            import subprocess as _sp
+            with st.status("Refreshing price cache from FMP…",
+                           expanded=True) as status_box:
+                script_path = str(
+                    Path(__file__).resolve().parent
+                    / "scripts" / "backfill_prices_fmp.py"
+                )
                 try:
-                    result = refresh_prices_from_ib(
-                        processed_dir=Path(processed_dir),
-                        progress_callback=_cb,
+                    result = _sp.run(
+                        [sys.executable, script_path, "--workers", "3", "--delay", "0.5"],
+                        capture_output=True, text=True, timeout=1800,
                     )
-                    status_box.update(
-                        label=(
-                            f"IB refresh done — {result.n_current} current, "
-                            f"{result.n_stale} stale, {result.n_missing} missing."
-                        ),
-                        state="complete",
-                        expanded=False,
-                    )
+                    tail = "\n".join(result.stdout.splitlines()[-20:])
+                    if result.returncode == 0:
+                        status_box.update(
+                            label="FMP refresh complete.",
+                            state="complete", expanded=False,
+                        )
+                        st.text(tail)
+                    else:
+                        status_box.update(
+                            label=f"FMP refresh returned {result.returncode}",
+                            state="error",
+                        )
+                        st.text(tail)
+                        st.stop()
                 except Exception as exc:  # noqa: BLE001
                     status_box.update(
-                        label=f"IB refresh failed: {exc}",
+                        label=f"FMP refresh failed: {exc}",
                         state="error",
                     )
                     st.stop()
