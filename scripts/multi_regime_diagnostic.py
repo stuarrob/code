@@ -30,6 +30,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+# Windows default is cp1252 which chokes on Unicode arrows / ellipses.
+# Force UTF-8 so this script survives ordinary quality glyphs.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -67,12 +73,31 @@ _PRICES: pd.DataFrame | None = None
 # ────────────────────────────────────────────────────────────────
 
 def _load_prices() -> pd.DataFrame:
-    """Load the full FMP-backfilled price frame. Uses close only (single column each)."""
+    """Load the full FMP-backfilled price frame. Uses close only.
+
+    Applies the leveraged/inverse-ETF filter (from
+    `src.data_collection.etf_filters.filter_leveraged_etfs`) — leveraged
+    funds like TQQQ, DRN, CURE, TMF hit the 100th percentile on every
+    factor (they amplify moves), so they mechanically dominate the
+    top-N-by-score selection regardless of weight vector. Without this
+    filter the strategy backtests as a leveraged basket producing
+    ~-70% max drawdowns, which is not what the live policy runs.
+    """
+    from src.data_collection.etf_filters import filter_universe
+
     cache_dir = Path.home() / "trade_data" / "ETFTrader" / "ib_historical"
     files = [p for p in cache_dir.glob("*.parquet") if p.stem != "manifest"]
+    all_tickers = [f.stem for f in files]
+    # Full smart-beta screen: matches pipeline.score_factors so the
+    # backtest simulates live behaviour, not a broader hypothetical universe.
+    kept = set(filter_universe(all_tickers))
+    print(f"loading {len(kept)}/{len(all_tickers)} price parquet files "
+          f"(smart-beta screen: leveraged/inverse/commodity/currency/vol filtered)...")
+
     frames: dict[str, pd.Series] = {}
-    print(f"loading {len(files)} price parquet files…")
     for i, f in enumerate(files):
+        if f.stem not in kept:
+            continue
         try:
             df = pd.read_parquet(f, columns=["close"])
             if len(df) > 20:
@@ -409,7 +434,7 @@ def _run_test_bank(configs: list[RunConfig], integrated: pd.DataFrame,
                 pass
             tasks.append((new_cfg, integrated, prices, reg_sig, reg_mult))
 
-    print(f"  running {len(tasks)} sim tasks across {workers} workers…")
+    print(f"  running {len(tasks)} sim tasks across {workers} workers...")
     if workers > 1:
         with mp.Pool(workers) as pool:
             rows = pool.map(_run_one, tasks)
@@ -454,7 +479,7 @@ def main() -> int:
 
     # Load inputs.
     prices = _load_prices()
-    print(f"prices: {prices.shape}, {prices.index.min().date()} → {prices.index.max().date()}")
+    print(f"prices: {prices.shape}, {prices.index.min().date()} -> {prices.index.max().date()}")
 
     spy_close = load_spy_cache()["close"]
     vix_close = load_vix_cache()["close"]
@@ -463,7 +488,7 @@ def main() -> int:
     prior = _prior_weights()
 
     # Phase 1 — rolling scores (single-threaded, cached).
-    print("\n[phase 1] rolling factor scores…")
+    print("\n[phase 1] rolling factor scores...")
     scores = _compute_rolling_scores(prices, policy)
     print(f"  rebalance dates: {len(scores.rebalance_dates)}, universe: {len(scores.universe)}")
 
@@ -482,7 +507,7 @@ def main() -> int:
 
     # Compute integrated frames for every unique weight vector.
     all_configs = [c for cs in configs_all.values() for c in cs]
-    print(f"\n[phase 1.5] integrating scores for {len(set(tuple(sorted(c.weights.items())) for c in all_configs))} unique weight vectors…")
+    print(f"\n[phase 1.5] integrating scores for {len(set(tuple(sorted(c.weights.items())) for c in all_configs))} unique weight vectors...")
     integrated_by_key = _prepare_integrated_for_configs(scores, all_configs, prices)
 
     # Phase 2 — parallel tests.

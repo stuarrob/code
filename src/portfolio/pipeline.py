@@ -23,7 +23,7 @@ from typing import Callable, Optional
 import numpy as np
 import pandas as pd
 
-from src.data_collection.etf_filters import filter_leveraged_etfs
+from src.data_collection.etf_filters import filter_leveraged_etfs, filter_universe
 from src.factors import (
     FactorIntegrator,
     MomentumFactor,
@@ -415,10 +415,15 @@ def score_factors(
         universe.
     """
     all_tickers = prices.columns.tolist()
-    basic_tickers = filter_leveraged_etfs(all_tickers)
+    # Full smart-beta universe screen: leverage/inverse + commodity + currency
+    # + volatility products. Matches the operator's design intent stated
+    # 2026-07-10. Diagnostic scripts must apply the same screen to be a
+    # fair simulation of live behaviour.
+    basic_tickers = filter_universe(all_tickers)
     excluded = len(all_tickers) - len(basic_tickers)
     logger.info(
-        "Universe: %d -> %d after leveraged/inverse exclusion (%d dropped)",
+        "Universe: %d -> %d after smart-beta screen (%d dropped: "
+        "leveraged/inverse/commodity/currency/vol)",
         len(all_tickers), len(basic_tickers), excluded,
     )
     prices_basic = prices[basic_tickers]

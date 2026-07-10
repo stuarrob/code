@@ -34,6 +34,34 @@ LEVERAGED_ETFS = {
 
     # Other leveraged
     "UVXY", "SVXY", "VXX", "VIXY", "TVIX",  # Volatility products
+
+    # Additions 2026-07-10 — caught ranking as leveraged in the
+    # multi-regime diagnostic. Direxion / ProShares / MicroSectors etc.
+    # Full name check would catch many of these but the diagnostic
+    # runs on tickers alone, so the enumeration must be complete.
+    "DRN", "DRV",                   # 3x Real Estate bull/bear
+    "UBT", "TBX",                   # 2x/2x 20+Y Treasury bull/inverse
+    "DGP", "DZZ",                   # 2x Gold bull/bear
+    "AGQ",                          # 2x Silver bull (dup, safe)
+    "DPST",                         # 3x Regional Bank bull
+    "TYD", "TYO",                   # 3x 7-10Y Treasury bull/bear
+    "WEBL", "WEBS",                 # 3x Internet bull/bear
+    "HIBL", "HIBS",                 # 3x High-Beta bull/bear
+    "FNGU", "FNGD",                 # 3x FANG+ bull/bear
+    "SPXL", "SPXS",                 # 3x S&P bull/bear
+    "CWEB",                         # 2x China Internet bull
+    "KORU",                         # 3x Korea bull
+    "GUSH", "DRIP",                 # 3x Oil & Gas Exploration bull/bear
+    "NAIL",                         # 3x Homebuilders bull
+    "BNKU", "BNKD",                 # 3x Bank bull/bear
+    "RETL",                         # 3x Retail bull
+    "SLVU", "SLVO", "SLVL",         # levered silver variants
+    "MSOX",                         # 2x Cannabis bull
+    "MEXX",                         # 3x Mexico bull
+    "EDC", "EDZ",                   # 3x Emerging Mkt bull/bear
+    "AGD",                          # 2x precious metals
+    "TAWK", "MJIN",                 # 2x thematic bull
+    "SOXX_dup_placeholder",         # sentinel; SOXL already listed
 }
 
 
@@ -78,6 +106,67 @@ def is_leveraged_etf(ticker: str, name: str = None) -> bool:
                 return True
 
     return False
+
+
+EXCLUDED_CATEGORY_PREFIXES = (
+    "Commodities_",       # GLD, SLV, DBC, USO, PALL, PPLT, etc.
+    "Currency",           # Single-currency ETFs (UUP, FXE, FXY)
+    "Volatility",         # VIXY etc. (leveraged vol already caught above)
+    "Volatility_Products",
+)
+
+
+def get_excluded_universe_tickers() -> Set[str]:
+    """Return tickers to exclude by category, per the operator design intent
+    of no-leverage, no-inverse, no-commodity, no-currency, no-volatility.
+
+    Reads categories from `comprehensive_etf_list.COMPREHENSIVE_ETF_UNIVERSE`
+    and collects every ticker in a category whose name starts with any of
+    `EXCLUDED_CATEGORY_PREFIXES`. Combined with `LEVERAGED_ETFS` this
+    yields the full "not eligible for the smart-beta strategy" set.
+
+    Kept as a lazy import so tests that don't need the universe don't pay
+    the module-load cost.
+    """
+    try:
+        from src.data_collection.comprehensive_etf_list import COMPREHENSIVE_ETF_UNIVERSE
+    except ModuleNotFoundError:
+        return set()
+    out: Set[str] = set()
+    for cat_name, tickers in COMPREHENSIVE_ETF_UNIVERSE.items():
+        if any(cat_name.startswith(p) for p in EXCLUDED_CATEGORY_PREFIXES):
+            out.update(tickers)
+    return out
+
+
+def filter_universe(
+    tickers: List[str],
+    etf_names: pd.Series = None,
+) -> List[str]:
+    """The full smart-beta universe screen: no leverage/inverse, no
+    commodity, no currency, no volatility products.
+
+    This is the operator's declared design intent (see chat 2026-07-10).
+    Used by both the live pipeline (`portfolio.pipeline.score_factors`)
+    and the multi-regime backtest diagnostic — they must apply the same
+    screen or the backtest is not a fair simulation of live behaviour.
+    """
+    excluded_category = get_excluded_universe_tickers()
+    filtered = []
+    excluded = []
+    for ticker in tickers:
+        name = etf_names.get(ticker) if etf_names is not None else None
+        if is_leveraged_etf(ticker, name):
+            excluded.append((ticker, "leveraged/inverse"))
+            continue
+        if ticker.upper() in excluded_category:
+            excluded.append((ticker, "commodity/currency/vol category"))
+            continue
+        filtered.append(ticker)
+    if excluded:
+        print(f"filter_universe: dropped {len(excluded)} tickers "
+              f"(leveraged/category-excluded); kept {len(filtered)}")
+    return filtered
 
 
 def filter_leveraged_etfs(
