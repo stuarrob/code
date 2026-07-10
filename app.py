@@ -54,6 +54,10 @@ from src.portfolio.explain import (
     narrate_proposal,
     narrate_with_claude,
 )
+from src.portfolio.execution import (
+    DEFAULT_AUDIT_DIR,
+    execute_proposal,
+)
 from src.data_collection.issuer_fundamentals import load_fundamentals_series
 from src.data_collection.ticker_metadata import enrich_tickers
 
@@ -1104,22 +1108,363 @@ with tab_explain:
 
 
 with tab_send:
-    st.header("Step 6 — BIG switch → IBKR")
-    st.error(
-        "⚠️ **This is the only step that talks to your live IB account.**  \n"
-        "Requires: IB Gateway Read-Only API **off**, and an explicit confirm."
-    )
-    st.info("Wired last (ADR-0001 action item #5).")
+    st.header("Step 6 — send to IBKR")
+
+    proposal = st.session_state.get("proposed_trades")
+    snap = st.session_state.get("ib_snapshot")
+
+    if proposal is None or snap is None:
+        st.info("Generate a proposal in tab 4 first.")
+    else:
+        # ────────────────────────────────────────────────────
+        # Pre-flight: existing TRAILs on tickers being SOLD
+        # ────────────────────────────────────────────────────
+        held_trail_tickers = snap.tickers_with_open_trail
+        selling_tickers = {
+            t.ticker for t in proposal.trades
+            if t.action in ("SELL",)
+        }
+        conflicting = held_trail_tickers & selling_tickers
+        if conflicting:
+            st.warning(
+                f"⚠️ **{len(conflicting)} tickers being SOLD still have "
+                f"existing TRAIL orders visible in your snapshot:** "
+                f"{', '.join(sorted(conflicting))}. IB will process the "
+                f"MARKET SELL immediately; when the leftover TRAIL later "
+                f"triggers there may be no position to sell (safe) OR a "
+                f"short may open if IB does not check. **Recommendation:** "
+                f"cancel these TRAILs manually in IB Gateway before Apply, "
+                f"or verify each ticker's exposure after execution."
+            )
+
+        # ────────────────────────────────────────────────────
+        # Dry-run preview
+        # ────────────────────────────────────────────────────
+        st.subheader("Dry-run preview")
+        st.caption(
+            "Shows the exact payloads that would go to IB. **No orders are "
+            "placed at this step.** Review carefully before enabling the "
+            "Apply gate below."
+        )
+        if st.button("Refresh dry-run preview"):
+            with st.spinner("Simulating…"):
+                try:
+                    dry_receipt = execute_proposal(
+                        proposal=proposal, policy=policy,
+                        ib=None, dry_run=True, audit_dir=DEFAULT_AUDIT_DIR,
+                    )
+                    st.session_state["dry_receipt"] = dry_receipt
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Dry-run failed: {exc}")
+
+        dry_receipt = st.session_state.get("dry_receipt")
+        if dry_receipt is not None:
+            all_orders = list(dry_receipt.results) + list(dry_receipt.trail_results)
+            preview_df = pd.DataFrame([
+                {
+                    "Ticker": r.ticker, "Action": r.action,
+                    "Order": r.order_kind, "Shares": r.shares,
+                    "Trail %": (
+                        f"{r.limit_or_trail_pct:.0%}"
+                        if r.limit_or_trail_pct is not None else "—"
+                    ),
+                    "Payload": r.message,
+                }
+                for r in all_orders
+            ])
+            st.dataframe(preview_df, hide_index=True, use_container_width=True)
+            st.caption(
+                f"{len(dry_receipt.results)} market orders + "
+                f"{len(dry_receipt.trail_results)} trailing stops. "
+                f"Audit log written to `{dry_receipt.audit_log_path}`."
+            )
+
+            # ────────────────────────────────────────────────
+            # Two-key gate + Apply
+            # ────────────────────────────────────────────────
+            st.divider()
+            st.error(
+                "⚠️ **The next section places real orders in your live "
+                "IBKR account.** Once both boxes are ticked and the "
+                "button is pressed, the trades above will go through."
+            )
+
+            gate1 = st.checkbox(
+                "IB Gateway **Read-Only API is OFF** (Global Config → API "
+                "→ Settings → uncheck 'Read-Only API')",
+                key="apply_gate_readonly_off",
+            )
+            gate2 = st.checkbox(
+                "I understand this will place real orders in the live "
+                "account and I have reviewed the dry-run preview above.",
+                key="apply_gate_confirmed",
+            )
+
+            apply_enabled = bool(gate1 and gate2)
+            if not apply_enabled:
+                st.info("Tick both boxes above to enable the Apply button.")
+
+            if st.button(
+                "APPLY TO IBKR",
+                type="primary",
+                disabled=not apply_enabled,
+            ):
+                # Connect (client-id rotation as in Step 1).
+                candidate_ids = [
+                    int(st.session_state.get("cash_budget", 0) or 0) + 40 + i
+                    for i in range(10)
+                ]
+                # Fallback to sensible default range if no budget scoping.
+                if candidate_ids[0] < 40:
+                    candidate_ids = list(range(40, 50))
+
+                ib = None
+                last_exc: Exception | None = None
+                for cid in candidate_ids:
+                    try:
+                        ib = connect_read_only(
+                            host=DEFAULT_IB_HOST, port=DEFAULT_IB_PORT,
+                            client_id=cid,
+                        )
+                        # Read-only connection cannot place orders. Reconnect
+                        # in write mode.
+                        try:
+                            ib.disconnect()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        from ib_insync import IB as _IB
+                        ib = _IB()
+                        ib.connect(
+                            DEFAULT_IB_HOST, DEFAULT_IB_PORT,
+                            clientId=cid, readonly=False, timeout=10,
+                        )
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        last_exc = exc
+                        if ib is not None:
+                            try:
+                                ib.disconnect()
+                            except Exception:
+                                pass
+                            ib = None
+                        if ("326" not in str(exc)
+                                and "already in use" not in str(exc)):
+                            break
+
+                if ib is None:
+                    st.error(
+                        f"Could not open a WRITE connection to IB Gateway "
+                        f"(tried client IDs {candidate_ids}). Last error: "
+                        f"{last_exc}. Confirm Gateway is running and "
+                        f"Read-Only API is OFF."
+                    )
+                else:
+                    with st.status(
+                        "Sending orders to IBKR…", expanded=True,
+                    ) as sbox:
+                        progress = st.progress(0.0)
+                        label = st.empty()
+
+                        def _cb(step: int, total: int, msg: str):
+                            progress.progress(min(step / max(total, 1), 1.0))
+                            label.markdown(f"`{step}/{total}` — {msg}")
+
+                        try:
+                            receipt = execute_proposal(
+                                proposal=proposal, policy=policy,
+                                ib=ib, dry_run=False,
+                                audit_dir=DEFAULT_AUDIT_DIR,
+                                progress_callback=_cb,
+                            )
+                            st.session_state["execution_receipt"] = receipt
+                            st.session_state["pre_execution_snapshot"] = snap
+                            sbox.update(
+                                label=(
+                                    f"Execution complete — "
+                                    f"{receipt.n_ok} OK / "
+                                    f"{receipt.n_failed} failed. "
+                                    f"See tab 7 for post-trade summary."
+                                ),
+                                state="complete",
+                                expanded=False,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            sbox.update(
+                                label=f"Execution failed: {exc}",
+                                state="error",
+                            )
+                        finally:
+                            try:
+                                ib.disconnect()
+                            except Exception:
+                                pass
+
+                    receipt = st.session_state.get("execution_receipt")
+                    if receipt is not None:
+                        st.success(
+                            f"Wrote receipt to `{receipt.audit_log_path}`. "
+                            f"Open tab 7 for the post-trade view."
+                        )
 
 
 with tab_summary:
     st.header("Step 7 — post-trade summary")
-    st.markdown(
-        "After the trades have been sent, this tab shows the resulting "
-        "portfolio, the new trailing stops in place, and a diff vs. the "
-        "state before the run."
-    )
-    st.info("Populated automatically once step 6 completes.")
+
+    receipt = st.session_state.get("execution_receipt")
+    pre = st.session_state.get("pre_execution_snapshot")
+
+    if receipt is None:
+        st.info("Send trades in tab 6 first — this tab populates automatically.")
+    else:
+        # ────────────────────────────────────────────────────
+        # Execution result headline
+        # ────────────────────────────────────────────────────
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Market orders", f"{len(receipt.results)}")
+        m2.metric("Trailing stops", f"{len(receipt.trail_results)}")
+        m3.metric("Succeeded", f"{receipt.n_ok}")
+        m4.metric("Failed", f"{receipt.n_failed}",
+                  delta="0" if receipt.n_failed == 0 else f"{receipt.n_failed}",
+                  delta_color=("normal" if receipt.n_failed == 0 else "inverse"))
+        m5.metric("Dry run", "yes" if receipt.dry_run else "no")
+        st.caption(
+            f"Started {receipt.started_at} · Finished {receipt.finished_at}. "
+            f"Audit log: `{receipt.audit_log_path}`."
+        )
+
+        # ────────────────────────────────────────────────────
+        # Order-by-order results
+        # ────────────────────────────────────────────────────
+        st.subheader("Order results")
+        all_orders = list(receipt.results) + list(receipt.trail_results)
+        result_df = pd.DataFrame([
+            {
+                "Ticker": r.ticker, "Action": r.action, "Order": r.order_kind,
+                "Shares": r.shares,
+                "Trail %": (f"{r.limit_or_trail_pct:.0%}"
+                            if r.limit_or_trail_pct is not None else "—"),
+                "Order ID": r.order_id if r.order_id is not None else "—",
+                "Status": r.status, "Message": r.message,
+                "Time": r.timestamp,
+            }
+            for r in all_orders
+        ])
+        st.dataframe(result_df, hide_index=True, use_container_width=True)
+
+        if receipt.errors:
+            st.subheader("Errors")
+            for e in receipt.errors:
+                st.error(e)
+
+        # ────────────────────────────────────────────────────
+        # Refresh live snapshot + diff vs pre
+        # ────────────────────────────────────────────────────
+        st.divider()
+        st.subheader("Live account — post-trade")
+        rc1, rc2 = st.columns([1, 3])
+        with rc1:
+            if st.button("Refresh snapshot from IB", type="primary"):
+                with st.spinner("Reconnecting to IB Gateway (read-only)…"):
+                    ib = None
+                    last_exc: Exception | None = None
+                    for cid in range(50, 60):
+                        try:
+                            ib = connect_read_only(
+                                host=DEFAULT_IB_HOST, port=DEFAULT_IB_PORT,
+                                client_id=cid,
+                            )
+                            fresh = fetch_snapshot(ib)
+                            try:
+                                ib.disconnect()
+                            except Exception:  # noqa: BLE001
+                                pass
+                            st.session_state["post_execution_snapshot"] = fresh
+                            break
+                        except Exception as exc:  # noqa: BLE001
+                            last_exc = exc
+                            if ib is not None:
+                                try:
+                                    ib.disconnect()
+                                except Exception:
+                                    pass
+                            if ("326" not in str(exc)
+                                    and "already in use" not in str(exc)):
+                                break
+                    else:
+                        st.error(f"Snapshot refresh failed: {last_exc}")
+        with rc2:
+            st.caption(
+                "Pulls a fresh IB snapshot and diffs positions + TRAILs "
+                "against the pre-trade snapshot. Filled orders should show "
+                "as position deltas; not-yet-filled orders may still be in "
+                "the open-orders list."
+            )
+
+        post = st.session_state.get("post_execution_snapshot")
+        if post is not None and pre is not None:
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("NAV", f"${post.nav:,.0f}",
+                      f"${post.nav - pre.nav:+,.0f}")
+            m2.metric("Cash", f"${post.cash:,.0f}",
+                      f"${post.cash - pre.cash:+,.0f}")
+            m3.metric("Positions", f"{len(post.positions)}",
+                      f"{len(post.positions) - len(pre.positions):+d}")
+            m4.metric("Open orders", f"{len(post.open_orders)}",
+                      f"{len(post.open_orders) - len(pre.open_orders):+d}")
+
+            # Position-by-position diff.
+            pre_map = {p.ticker: p.shares for p in pre.long_positions}
+            post_map = {p.ticker: p.shares for p in post.long_positions}
+            all_tickers = sorted(set(pre_map) | set(post_map))
+            diff_rows = []
+            for t in all_tickers:
+                before = pre_map.get(t, 0.0)
+                after = post_map.get(t, 0.0)
+                delta = after - before
+                if abs(delta) < 0.5 and before == after:
+                    continue
+                diff_rows.append({
+                    "Ticker": t,
+                    "Before": before, "After": after, "Δ shares": delta,
+                    "Verdict": (
+                        "New position" if before == 0 and after > 0
+                        else "Closed out" if before > 0 and after == 0
+                        else "Extended" if delta > 0
+                        else "Reduced" if delta < 0
+                        else "Unchanged"
+                    ),
+                })
+            if diff_rows:
+                st.subheader("Position diff")
+                st.dataframe(
+                    pd.DataFrame(diff_rows), hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "Before": st.column_config.NumberColumn(format="%.0f"),
+                        "After": st.column_config.NumberColumn(format="%.0f"),
+                        "Δ shares": st.column_config.NumberColumn(format="%+.0f"),
+                    },
+                )
+            else:
+                st.info(
+                    "No position changes visible yet — orders may still be "
+                    "in flight. Wait ~30 seconds and refresh again."
+                )
+
+            # New TRAILs.
+            pre_trails = {t.ticker for t in pre.open_trails}
+            post_trails = {t.ticker for t in post.open_trails}
+            new_trails = post_trails - pre_trails
+            if new_trails:
+                st.subheader("New trailing stops in place")
+                st.write(", ".join(sorted(new_trails)))
+        elif post is not None:
+            st.info(
+                "Fresh snapshot loaded but no pre-execution snapshot to "
+                "diff against. Metrics only."
+            )
+        else:
+            st.info("Click *Refresh snapshot from IB* above.")
 
 
 st.divider()

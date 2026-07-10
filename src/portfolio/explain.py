@@ -305,7 +305,7 @@ def narrate_with_claude(
 
 
 def _escape_streamlit_dollars(text: str) -> str:
-    """Escape any unescaped `$` so Streamlit's markdown does not treat it as
+    r"""Escape any unescaped `$` so Streamlit's markdown does not treat it as
     inline LaTeX math. Idempotent — running twice does not double-escape.
 
     Also strips known math-mode wrappers Claude sometimes emits despite

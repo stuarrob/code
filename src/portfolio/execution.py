@@ -150,6 +150,7 @@ def execute_proposal(
     audit_dir: Path = DEFAULT_AUDIT_DIR,
     attach_trailing_stops: bool = True,
     ack_wait_sec: float = _ACK_WAIT_SEC,
+    progress_callback: Optional[callable] = None,
 ) -> ExecutionReceipt:
     """Walk the proposal, place orders, attach trailing stops, log everything.
 
@@ -194,7 +195,23 @@ def execute_proposal(
             key=lambda t: {ACTION_SELL: 0, ACTION_EXTEND: 1, ACTION_BUY: 2}[t.action],
         )
 
+        total_steps = len(actioned) + sum(
+            1 for t in actioned
+            if attach_trailing_stops and t.delta_shares > 0
+        )
+        step = 0
+
         for trade in actioned:
+            step += 1
+            if progress_callback:
+                try:
+                    progress_callback(
+                        step, total_steps,
+                        f"{trade.action} {abs(trade.delta_shares)} {trade.ticker}",
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
             result = _place_market_trade(trade, ib, dry_run, ack_wait_sec)
             results.append(result)
             _write_audit(audit_log_fh, result, trade)
@@ -203,6 +220,16 @@ def execute_proposal(
                 trail_qty = _compute_trail_qty(trade)
                 if trail_qty <= 0:
                     continue
+                step += 1
+                if progress_callback:
+                    try:
+                        progress_callback(
+                            step, total_steps,
+                            f"TRAIL {trail_qty} {trade.ticker} @ "
+                            f"{policy.trailing_stop_pct:.0%}",
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
                 trail = _place_trailing_stop(
                     ticker=trade.ticker,
                     shares=trail_qty,
