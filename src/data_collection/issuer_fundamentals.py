@@ -46,17 +46,14 @@ schema, update the relevant class and bump `schema_version`.
 from __future__ import annotations
 
 import concurrent.futures
-import json
-import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
 
 try:
     from src.utils.logging_config import get_logger
@@ -208,141 +205,113 @@ class IssuerScraper:
 
 
 # ────────────────────────────────────────────────────────────────
-# Vanguard
+# Financial Modeling Prep — cross-issuer coverage via single REST API
 # ────────────────────────────────────────────────────────────────
 
-class VanguardScraper(IssuerScraper):
-    """Vanguard ETF fundamentals via their public fund-profile JSON endpoint.
+class FmpScraper(IssuerScraper):
+    """ETF fundamentals via Financial Modeling Prep's `stable` REST API.
 
-    URL shape (2026-07):
-        https://api.vanguard.com/rs/gre/gra/1.0/datasets/urd-profile-basic-data
-            .jsonp?path=urd/GB/en/vanguard/products/<TICKER>
+    FMP is a cross-issuer consolidator — one API call handles Vanguard,
+    iShares, State Street, Invesco, Schwab and everything else in one go.
+    Removes the fragility of scraping each issuer's ever-changing site.
 
-    The JSON contains `equityCharacteristics` with `priceEarningsRatio`,
-    `priceBookRatio`, `dividendYield` for equity funds. Bond funds return a
-    different schema (yield-to-maturity, duration) which we ignore for now —
-    the value factor is equity-focused.
+    Endpoint used
+    -------------
+    Primary:  GET /stable/profile?symbol=<TICKER>
+        Returns: price, lastDividend (TTM per-share), marketCap, beta, isEtf.
+        We compute dividend_yield = lastDividend / price. This is the
+        canonical calculation for trailing 12-month distribution yield —
+        no per-issuer variation, no schema-drift risk.
 
-    If Vanguard changes the endpoint, bump `schema_version` and update
-    `_parse_json`.
+    Not yet used (require FMP Premium or higher tier)
+    -------------------------------------------------
+    - /stable/etf-info?symbol=X       — sector breakdown, official yield
+    - /stable/key-metrics-ttm?...     — P/E, P/B, ROE
+    - /stable/ratios-ttm?...          — richer ratio set
+
+    If the user upgrades the subscription, plumb these in via new methods
+    and populate `pe_ratio` / `pb_ratio` from `key-metrics-ttm`. The router
+    contract doesn't change — this scraper starts returning richer rows.
+
+    Config
+    ------
+    FMP_API_KEY must be set in .env. Key is passed as a query parameter
+    (their convention) — the requests session does not carry it in a header.
     """
-    name = "vanguard"
+    name = "fmp"
     schema_version = 1
 
-    # Cheap prefilter: Vanguard tickers are almost all V-prefixed with a
-    # handful of exceptions (BND, BIV, BSV — bond ETFs, still Vanguard).
-    _VANGUARD_TICKER_HINTS = {
-        "V",  # VTI, VOO, VEA, VWO, VUG, VTV, VIG, VYM, VGT, VNQ, VOX, VDC, ...
-    }
-    _VANGUARD_KNOWN_EXCEPTIONS = {"BND", "BIV", "BSV", "BLV", "BNDX", "BNDW", "MGC", "MGK", "MGV"}
+    _BASE_URL = "https://financialmodelingprep.com/stable"
 
-    _PROFILE_URL = "https://investor.vanguard.com/investment-products/etfs/profile/{ticker}"
+    def __init__(self, config: Optional[ScraperConfig] = None,
+                 api_key: Optional[str] = None):
+        super().__init__(config)
+        import os
+        self.api_key = api_key or os.environ.get("FMP_API_KEY")
+        if not self.api_key:
+            logger.warning("FmpScraper: FMP_API_KEY not set; will return empty rows.")
 
     def matches(self, ticker: str) -> bool:
-        t = ticker.upper()
-        if t in self._VANGUARD_KNOWN_EXCEPTIONS:
-            return True
-        return t.startswith("V") and len(t) <= 4
+        """FMP covers the whole universe — always claim."""
+        return self.api_key is not None
 
     def fetch(self, ticker: str) -> Fundamentals:
-        """Fetch Vanguard fund profile HTML and extract the embedded JSON.
+        """Fetch profile, compute yield, return.
 
-        Vanguard's investor-facing pages are React apps that embed the fund
-        characteristics as a JSON blob in the initial HTML. We parse that
-        rather than call the internal API endpoint — the HTML embed is more
-        stable across their frequent API version bumps.
+        On any failure returns an empty Fundamentals with source='fmp' so
+        the router can distinguish 'we tried and got nothing' from 'no
+        scraper claimed this ticker'.
         """
-        url = self._PROFILE_URL.format(ticker=ticker.upper())
-        resp = self._get(url)
+        if not self.api_key:
+            return self._empty(ticker)
+        url = f"{self._BASE_URL}/profile"
+        resp = self._get(url, params={"symbol": ticker.upper(), "apikey": self.api_key})
         if resp is None:
             return self._empty(ticker)
         try:
-            return self._parse_html(ticker, resp.text)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"vanguard: parse failed for {ticker}: {exc}")
+            payload = resp.json()
+        except ValueError:
+            logger.warning(f"fmp: {ticker} returned non-JSON body")
+            return self._empty(ticker)
+        return self._parse_profile(ticker, payload)
+
+    def _parse_profile(self, ticker: str, payload) -> Fundamentals:
+        """Extract yield from the profile response.
+
+        FMP returns a list even for a single-symbol query. When the symbol
+        is unknown they return `[]`. When it exists they return
+        `[{...one-row-object...}]`.
+        """
+        if not isinstance(payload, list) or not payload:
+            return self._empty(ticker)
+        row = payload[0]
+        if not isinstance(row, dict):
             return self._empty(ticker)
 
-    def _parse_html(self, ticker: str, html: str) -> Fundamentals:
-        """Extract fundamentals from Vanguard's embedded state JSON.
+        last_div = _as_float(row.get("lastDividend"))
+        price = _as_float(row.get("price"))
+        if pd.isna(last_div) or pd.isna(price) or price <= 0:
+            div_yield = float("nan")
+        else:
+            div_yield = last_div / price
+            # Sanity clamp — anything above 30% is almost certainly a data
+            # error (leveraged ETFs and MLPs can look extreme). Log and NaN.
+            if div_yield > 0.30:
+                logger.warning(
+                    f"fmp: {ticker} implied yield {div_yield:.1%} exceeds 30% "
+                    f"sanity threshold (lastDividend={last_div}, price={price}) — dropping"
+                )
+                div_yield = float("nan")
 
-        The page contains a <script> tag with `window.__INITIAL_STATE__ = {...}`
-        or a Next.js-style `__NEXT_DATA__` block. Both patterns appear at
-        different points in Vanguard's redesigns; try each in order.
-
-        Returns a Fundamentals with as many fields as we can extract, NaN
-        for anything the page doesn't publish for this specific fund.
-        """
-        soup = BeautifulSoup(html, "html.parser")
-
-        # Pattern 1: Next.js __NEXT_DATA__
-        next_data = soup.find("script", id="__NEXT_DATA__")
-        if next_data and next_data.string:
-            payload = json.loads(next_data.string)
-            return self._extract_from_next_data(ticker, payload)
-
-        # Pattern 2: legacy window.__INITIAL_STATE__
-        for script in soup.find_all("script"):
-            text = script.string or ""
-            m = re.search(r"window\.__INITIAL_STATE__\s*=\s*(\{.*?\});", text, re.DOTALL)
-            if m:
-                payload = json.loads(m.group(1))
-                return self._extract_from_initial_state(ticker, payload)
-
-        logger.warning(f"vanguard: no recognised state blob found for {ticker}")
-        return self._empty(ticker)
-
-    def _extract_from_next_data(self, ticker: str, payload: dict) -> Fundamentals:
-        """Walk the Next.js state tree for the characteristics we want.
-
-        The exact JSON path varies with Vanguard's build. Rather than pin an
-        exact path (fragile), do a shallow recursive search for keys that
-        match the equityCharacteristics contract.
-        """
-        found = _deep_find_first(payload, [
-            "equityCharacteristics",
-            "characteristics",
-            "fundCharacteristics",
-        ])
-        if not found:
-            return self._empty(ticker)
         return Fundamentals(
             ticker=ticker,
-            pe_ratio=_as_float(found.get("priceEarningsRatio")),
-            pb_ratio=_as_float(found.get("priceBookRatio")),
-            dividend_yield=_pct_as_decimal(found.get("dividendYield")),
-            as_of=found.get("asOfDate") or found.get("effectiveDate"),
+            pe_ratio=float("nan"),   # Available on Premium tier
+            pb_ratio=float("nan"),   # Available on Premium tier
+            dividend_yield=div_yield,
+            as_of=None,              # profile endpoint does not carry a snapshot date
             source=self.name,
             schema_version=self.schema_version,
         )
-
-    def _extract_from_initial_state(self, ticker: str, payload: dict) -> Fundamentals:
-        # Same walk — the wrapping differs but the leaf shape is consistent.
-        return self._extract_from_next_data(ticker, payload)
-
-
-# ────────────────────────────────────────────────────────────────
-# iShares — scaffold, to be implemented next
-# ────────────────────────────────────────────────────────────────
-
-class IsharesScraper(IssuerScraper):
-    """iShares / BlackRock ETF fundamentals.
-
-    Not yet implemented. iShares publishes a per-fund JSON endpoint at
-    `https://www.ishares.com/us/products/<PRODUCT_ID>/<slug>/1467271812596.ajax`
-    but discovering the PRODUCT_ID from a ticker requires an initial search
-    call. Implementation deferred to next commit.
-    """
-    name = "ishares"
-    schema_version = 0  # 0 = not yet real
-
-    _ISHARES_TICKER_HINTS = {"I", "E"}  # IVV, ITOT, IWM, EEM, EFA, ...
-
-    def matches(self, ticker: str) -> bool:
-        t = ticker.upper()
-        return t[0] in self._ISHARES_TICKER_HINTS
-
-    def fetch(self, ticker: str) -> Fundamentals:
-        return self._empty(ticker)
 
 
 # ────────────────────────────────────────────────────────────────
@@ -357,10 +326,12 @@ class FundamentalsRouter:
     (rare) are cross-listed or have ambiguous prefixes.
     """
     def __init__(self, scrapers: Optional[list[IssuerScraper]] = None):
-        self.scrapers = scrapers or [
-            VanguardScraper(),
-            IsharesScraper(),
-        ]
+        # FMP is a cross-issuer consolidator — one endpoint handles the whole
+        # universe. The `IssuerScraper` abstraction and this router remain in
+        # place so a second data source (SEC XBRL, Databento fundamentals if
+        # they add it, a paid P/E provider) can be plugged in later without
+        # refactoring. YAGNI does not mean deleting the plug.
+        self.scrapers = scrapers or [FmpScraper()]
 
     def fetch_one(self, ticker: str) -> Fundamentals:
         """Try each matching scraper; return first with coverage, or empty.

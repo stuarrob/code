@@ -20,11 +20,11 @@ import pandas as pd
 import pytest
 
 from src.data_collection.issuer_fundamentals import (
+    FmpScraper,
     Fundamentals,
     FundamentalsRouter,
     IssuerScraper,
     ScraperConfig,
-    VanguardScraper,
     _as_float,
     _deep_find_first,
     _pct_as_decimal,
@@ -236,44 +236,54 @@ class TestCoverageReport:
 
 
 # ────────────────────────────────────────────────────────────────
-# Vanguard-specific extraction
+# FMP profile parser — the yield-from-lastDividend calculation
 # ────────────────────────────────────────────────────────────────
 
-class TestVanguardExtract:
-    def test_next_data_shape(self):
-        payload = {
-            "props": {
-                "pageProps": {
-                    "fundData": {
-                        "equityCharacteristics": {
-                            "priceEarningsRatio": 22.4,
-                            "priceBookRatio": 3.1,
-                            "dividendYield": 1.35,   # published as pct
-                            "asOfDate": "2026-06-30",
-                        }
-                    }
-                }
-            }
-        }
-        scraper = VanguardScraper(ScraperConfig(request_delay_sec=0.0))
-        result = scraper._extract_from_next_data("VOO", payload)
-        assert result.pe_ratio == 22.4
-        assert result.pb_ratio == 3.1
-        # 1.35% published → 0.0135 decimal
-        assert result.dividend_yield == pytest.approx(0.0135)
-        assert result.as_of == "2026-06-30"
-        assert result.source == "vanguard"
+class TestFmpParseProfile:
+    def _scraper(self):
+        return FmpScraper(config=ScraperConfig(request_delay_sec=0.0), api_key="test-key")
 
-    def test_next_data_missing_returns_empty(self):
-        scraper = VanguardScraper(ScraperConfig(request_delay_sec=0.0))
-        result = scraper._extract_from_next_data("VOO", {"unrelated": "junk"})
+    def test_normal_etf(self):
+        """VOO-like payload: lastDividend / price gives a realistic yield."""
+        payload = [{
+            "symbol": "VOO",
+            "price": 690.69,
+            "lastDividend": 7.3456,
+            "isEtf": True,
+        }]
+        result = self._scraper()._parse_profile("VOO", payload)
+        # 7.3456 / 690.69 ≈ 0.01064
+        assert result.dividend_yield == pytest.approx(0.01064, rel=1e-3)
+        assert result.source == "fmp"
+        assert math.isnan(result.pe_ratio)     # tier-gated, expected NaN
+        assert math.isnan(result.pb_ratio)     # tier-gated, expected NaN
+
+    def test_empty_list(self):
+        """FMP returns [] for unknown symbols."""
+        result = self._scraper()._parse_profile("XXXX", [])
         assert not result.is_covered
-        assert result.source == "vanguard"
+        assert result.source == "fmp"
 
-    def test_matches_ticker_prefix(self):
-        scraper = VanguardScraper(ScraperConfig(request_delay_sec=0.0))
-        assert scraper.matches("VTI")
-        assert scraper.matches("VOO")
-        assert scraper.matches("BND")     # known exception
-        assert not scraper.matches("QQQ")
-        assert not scraper.matches("SPY")
+    def test_zero_price_returns_nan(self):
+        """Divide-by-zero guard."""
+        payload = [{"symbol": "X", "price": 0, "lastDividend": 5}]
+        result = self._scraper()._parse_profile("X", payload)
+        assert math.isnan(result.dividend_yield)
+
+    def test_missing_last_dividend_returns_nan(self):
+        payload = [{"symbol": "X", "price": 100}]
+        result = self._scraper()._parse_profile("X", payload)
+        assert math.isnan(result.dividend_yield)
+
+    def test_sanity_clamp_on_extreme_yield(self):
+        """A 100% implied yield is almost certainly a data error, not real."""
+        payload = [{"symbol": "X", "price": 5.0, "lastDividend": 6.0}]  # 120% yield
+        result = self._scraper()._parse_profile("X", payload)
+        assert math.isnan(result.dividend_yield)
+
+    def test_matches_only_when_api_key_present(self):
+        with_key = FmpScraper(api_key="test-key")
+        without_key = FmpScraper(api_key=None)
+        without_key.api_key = None  # explicitly nuke env-loaded key
+        assert with_key.matches("ANYTHING")
+        assert not without_key.matches("ANYTHING")

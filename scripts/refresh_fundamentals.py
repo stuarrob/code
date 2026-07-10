@@ -37,10 +37,16 @@ from src.data_collection.issuer_fundamentals import (
 # reveals itself immediately in the printed output.
 SMOKE_TICKERS = ["VOO", "VTI", "VUG", "VYM"]
 
-# Coverage thresholds — refuse to overwrite the cache below these.
+# Coverage threshold — refuse to overwrite the cache below this.
 # Rationale: a partial refresh that trashes the value factor for half the
 # universe is worse than a stale cache.
-MIN_COVERAGE_FRAC = 0.30  # loose while only Vanguard is implemented; tighten later
+#
+# Set to 20% for the current yield-only value factor. Empirical baseline:
+# ~28% of our 792-ticker universe pays a dividend (28.3% observed on the
+# 2026-07 refresh). Anything materially below that suggests FMP is
+# rate-limiting or the API key is failing. When the value factor upgrades
+# to yield + P/E + P/B (Premium FMP tier), tighten this to 0.60.
+MIN_COVERAGE_FRAC = 0.20
 
 
 def _load_universe() -> list[str]:
