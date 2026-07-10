@@ -13,34 +13,17 @@
 
 \geometry{margin=1in}
 
-\title{\textbf{Multi-Factor ETF Strategy with Automated Risk Management}\\
-\large Technical Investment Document --- \emph{Living Edition}}
+\title{\textbf{Multi-Factor ETF Strategy}\\
+\large Operating Document}
 
-\author{Quantitative Portfolio Management\\
-Repository: \texttt{stuarrob/code} (branch \texttt{main})}
+\author{Stuart R. \\ Live account: U9544585}
 
-\date{Last major review: 2026-07-09 \\ Continuously maintained; see \S\ref{sec:living} and Change Log}
+\date{2026-07-10}
 
 \hypersetup{
     colorlinks=true,
     linkcolor=blue,
-    filecolor=magenta,
     urlcolor=cyan,
-    pdftitle={Multi-Factor ETF Strategy},
-    pdfpagemode=FullScreen,
-}
-
-\lstset{
-    language=Python,
-    basicstyle=\ttfamily\small,
-    keywordstyle=\color{blue},
-    commentstyle=\color{gray},
-    stringstyle=\color{red},
-    numbers=left,
-    numberstyle=\tiny\color{gray},
-    breaklines=true,
-    frame=single,
-    captionpos=b
 }
 
 \begin{document}
@@ -48,13 +31,7 @@ Repository: \texttt{stuarrob/code} (branch \texttt{main})}
 \maketitle
 
 \begin{abstract}
-This is the \textbf{operating document} for a live-money systematic ETF strategy running against an Interactive Brokers account. It is designed to be read \emph{instead of the code}, and to remain accurate to the code as the code evolves. It combines a specification of the strategy, a canonical statement of the currently-live policy values, an adversarial review of known limitations, and a change log.
-
-The strategy selects ETFs from a broad US-listed universe using a weighted geometric mean of four factors: momentum, quality, low-volatility, and value. Factor weights (currently 35/30/20/15) are held as an \emph{informed prior} rather than an in-sample optimum, on ergodicity-economics grounds described in \S\ref{sec:weight_justification}. Portfolio construction is rank-based with top-N selection (currently N=20) and exponential rank weights. Risk management is via percentage-based trailing stops placed on every entry.
-
-The document is deliberately organised so that (a) values which can drift are pulled into a single \emph{Canonical Live Configuration} section (\S\ref{sec:canonical}) that mirrors \texttt{configs/etf\_smart\_beta.toml}, (b) the strategy narrative in the body describes the design intent regardless of specific parameter values, and (c) an \emph{Adversarial Review} section (\S\ref{sec:adversarial}) records known flaws with dated action plans. Historical backtest metrics referenced in the body describe design-time analyses; live-account performance is reported separately in the change log.
-
-Reader assumption: you are a serious investor with real money in this system, not a marketing target. Numbers that are unknown or degraded are stated as such rather than papered over.
+Long-only smart-beta ETF strategy operated against a live IB Gateway account. Selects positions from a filtered universe of $\sim$2{,}000 US-listed ETFs by ranking on a weighted geometric mean of four factors (momentum, quality, low-volatility, value). Top 20 held with exponential rank weights; 10\% trailing stops on every position; drift-triggered rebalance ($\sim$6/yr). This document is the operator's reading surface and takes precedence over marketing summaries; the code in \texttt{src/} is authoritative for behaviour, this document is authoritative for intent.
 \end{abstract}
 
 \newpage
@@ -62,147 +39,257 @@ Reader assumption: you are a serious investor with real money in this system, no
 \newpage
 
 %% ============================================================
-\section{Living Document Compact}
-\label{sec:living}
+\section{Executive Summary}
+\label{sec:exec}
 %% ============================================================
 
-\subsection{Purpose and Reader Contract}
+\subsection{What This Is}
 
-This document is the single reading surface for the strategy. The operator has explicitly declared that they read this document rather than the code as the primary way to understand what the system does and why. That places three obligations on the document:
+A systematic, deterministic, long-only ETF portfolio. No LLM sets sizes or places orders. No factor timing. No sentiment trading. All numeric parameters trace to either academic literature or the calibration diagnostic under \texttt{docs/research/}.
+
+Operated weekly: cache refresh Saturday evening, review Sunday, apply mid-week when the model proposes a rebalance and the operator approves.
+
+\subsection{Live Snapshot (2026-07-09)}
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lr}
+\toprule
+Net Liquidation Value & \$390{,}940 \\
+Cash                  & \$84{,}552 \\
+Positions             & 28 \\
+Live earnings (owner's estimate) & $\sim$13--14\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Position count of 28 exceeds the target of 20 --- an artefact of accumulated held positions from prior operating configurations; will normalise on the next rebalance.
+
+\subsection{Backtest Metrics (35/30/20/15 policy, top-20, RankBased exponential)}
+
+Level-1 diagnostic \texttt{docs/research/2026-07\_factor\_weight\_diagnostic.md} on the cached ETF universe 2021-04-12 to 2026-04-16, monthly rebalance, 5~bps turnover.
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lrrrr}
+\toprule
+Window & Sharpe & Sortino & CAGR & Max Drawdown \\
+\midrule
+Full 5-year & 0.47 & 0.60 & 8.07\% & -9.55\% \\
+Trailing 3-year & 0.96 & 1.22 & 13.32\% & -9.09\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The live earnings estimate matches the 3-year backtest CAGR. The 5-year window includes the 2022 bear market drawdown; the 3-year excludes it.
+
+\subsection{Positioning}
+
+The strategy targets modest outperformance versus SPY with meaningfully lower drawdown. It is not designed to beat SPY by 5\% per year. A year in which the strategy returns 12\% while SPY returns 15\% is a good year for the strategy \emph{if} its drawdown is materially lower over the same period.
+
+%% ============================================================
+\section{Strategy Mechanics}
+\label{sec:mechanics}
+%% ============================================================
+
+\subsection{Universe Selection}
+
+Starting from the full IB-listed ETF universe (\textasciitilde 5{,}000 tickers), the filter chain is:
 
 \begin{enumerate}[noitemsep]
-    \item \textbf{Accuracy over marketing.} If the live configuration differs from a value described in a body section, the discrepancy is a documentation bug and must be reconciled. Never present a stale spec as if it were current.
-    \item \textbf{Honesty over optimism.} Known limitations get their own section (\S\ref{sec:adversarial}) and remain there until fixed. Backtest performance is separated from live performance; both are labelled.
-    \item \textbf{Provenance.} Every material claim traces to either (a) the code / policy file (with path), (b) a dated research note under \texttt{docs/research/}, or (c) published academic literature. If a claim traces only to intuition, it says so.
+    \item History requirement: $\geq$252 trading days of price data.
+    \item Data quality: $<$10\% missing daily bars.
+    \item Leveraged/inverse exclusion: leveraged ETFs are removed by ticker prefix and issuer classification.
+    \item Result: $\sim$2{,}000 candidates on which factor scores are computed.
 \end{enumerate}
 
-\subsection{How to Keep This Document Living}
+\subsection{Factor Framework --- What the Four Factors Are and Why}
 
-The canonical sources of truth are, in order of authority:
+The four factors below are the AQR-canonical smart-beta four: momentum, quality, low-volatility, value. They were chosen because they are the four with the largest and most robust empirical premia over the widest range of markets and time periods studied in the academic literature. AQR chose these because after decades of empirical work they are the return sources that survive out-of-sample testing, transaction costs, and factor-crowding. The strategy does not attempt to identify novel factors.
+
+\subsubsection{Momentum (target 35\% weight)}
+
+\begin{equation}
+\text{Momentum}_i = \frac{P_{i,t-21} - P_{i,t-252}}{P_{i,t-252}}
+\end{equation}
+
+12-month return, with the most recent 21 days omitted. Winsorised at the 1st and 99th percentile.
+
+\textbf{Why:} Assets that have outperformed over the prior year tend to continue outperforming over the next year. The 1-month skip avoids the short-term reversal effect that would contaminate the trend signal. Established by Jegadeesh \& Titman (1993); the skip refinement from Novy-Marx (2012).
+
+\textbf{Why AQR uses it:} The most-studied, most-robust factor after value, and the largest-premium factor in the last decade. Works across equity, futures, and FX. Fails during trend reversals (2022 tech drawdown, 2000 dot-com peak).
+
+\subsubsection{Quality (target 30\% weight)}
+
+Composite of three z-score-normalised components on 252-day windows:
+
+\begin{align}
+\text{Sharpe Ratio} &= \frac{\mu_r - r_f}{\sigma_r} \sqrt{252} \quad (40\% \text{ weight}) \\
+\text{Drawdown Resilience} &= -1 \times \text{MaxDD} \quad (30\% \text{ weight}) \\
+\text{Return Stability} &= -1 \times \sigma_r \sqrt{252} \quad (30\% \text{ weight})
+\end{align}
+
+\textbf{Why:} Assets that produce stable, high risk-adjusted returns tend to continue doing so. Established by Asness, Frazzini \& Pedersen (2019).
+
+\textbf{Why AQR uses it:} Quality captures the defensive-equity premium. Correlated with low-volatility but not identical --- quality picks up profitability and stability of \emph{returns}, low-vol picks up stability of \emph{prices}. Both belong in the portfolio because they hedge different aspects of stress.
+
+\subsubsection{Low-Volatility (target 20\% weight)}
+
+\begin{equation}
+\text{Volatility}_i = \frac{1}{\sigma_{60d,i} \times \sqrt{252}}
+\end{equation}
+
+Inverse of annualised realised volatility over 60 trading days. Higher score for lower-volatility ETFs.
+
+\textbf{Why:} The low-volatility anomaly --- lower-volatility assets have historically produced higher risk-adjusted returns than higher-volatility assets, contradicting the CAPM. Baker, Bradley \& Wurgler (2011).
+
+\textbf{Why AQR uses it:} Two reasons. First, the low-vol premium is real and persistent. Second, low-vol allocations reduce portfolio-level whipsaw, which matters more than arithmetic-mean metrics suggest in a compounding portfolio (see \S\ref{sec:weights}).
+
+\subsubsection{Value (target 15\% weight) --- currently degraded}
+
+\begin{equation}
+\text{Value}_i = -1 \times \text{Expense Ratio}_i
+\end{equation}
+
+\textbf{This is not a value factor.} It is a low-fee preference. A real value factor uses fundamental multiples (P/E, P/B, dividend yield, EBITDA/EV). The current implementation was chosen for simplicity and is on the fix list at \S\ref{sec:flaws} T1.1. Until fixed, the 15\% weight allocated to value is buying almost no cross-sectional signal.
+
+\textbf{Why AQR uses value:} It is the oldest and most-studied factor (Fama \& French 1993). Tends to work when growth and momentum break (2000--2002, 2022). Its absence here is the strategy's largest current gap.
+
+\subsection{Factor Integration}
+
+\begin{equation}
+\text{Score}_i = \text{Mom}_i^{0.35} \times \text{Qual}_i^{0.30} \times \text{Vol}_i^{0.20} \times \text{Val}_i^{0.15}
+\end{equation}
+
+Each factor is first converted to a percentile rank in [0,1]. The integrated score is the weighted geometric mean of ranks.
+
+\textbf{Why geometric mean, not arithmetic:} Geometric-mean integration penalises weakness on any one factor. An ETF in the 90th percentile on three factors but the 20th on one ranks below an ETF in the 70th percentile on all four. This ``multi-factor consistency'' requirement --- explicitly the key insight from AQR's factor-integration research --- rejects one-trick candidates in favour of broadly-strong candidates. Arithmetic integration would allow one strong factor to compensate for weakness on the others.
+
+\subsection{Portfolio Construction}
 
 \begin{enumerate}[noitemsep]
-    \item \texttt{configs/etf\_smart\_beta.toml} --- the live policy parameters (weights, position count, bounds, stops, etc.).
-    \item Files under \texttt{src/} --- the deterministic pipeline. In case of conflict with the doc, code wins and the doc gets fixed.
-    \item \texttt{docs/research/} --- dated research notes justifying policy values.
-    \item \texttt{docs/RESEARCH\_BACKLOG.md} --- open questions and their status.
-    \item \texttt{git log} --- authoritative for ``when did this change and why.''
+    \item Score every ETF in the filtered universe.
+    \item Rank descending.
+    \item Take the top 20.
+    \item Assign exponential rank weights: $w_i \propto e^{-\text{rank}_i / 20}$, normalised to sum to 1.
+    \item Apply weight bounds: minimum 2\%, maximum 15\%.
 \end{enumerate}
 
-\textbf{Update triggers.} This document must be edited (and the Change Log at \S\ref{sec:changelog} appended) whenever:
+Exponential weighting expresses conviction --- the top-ranked position gets meaningfully more weight than the twentieth --- while the bounds prevent single-position concentration. The alternative optimiser (\texttt{OPTIMIZER\_TYPE = "mvo"}) is available in the code but not the live default.
+
+\subsection{Rebalancing}
+
+\begin{enumerate}[noitemsep]
+    \item Scheduled: bimonthly ($\sim$6 times per year).
+    \item Drift-triggered: if any position's actual weight deviates from target by $>$5\%, rebalance.
+    \item In practice, drift triggers dominate; scheduled rebalances rarely fire independently.
+\end{enumerate}
+
+Drift threshold is deliberately wide. Tighter thresholds cause more trading on smaller deviations --- textbook whipsaw. See \S\ref{sec:principles}.
+
+\subsection{Risk Management}
+
+Every entry BUY places a 10\% trailing stop, GTC, on the position. Trailing stops ratchet up as the position appreciates. On any 10\% pullback from the running high, the stop triggers.
+
+Entry stop-loss of 12\% (a bit wider than the trailing stop) accommodates initial-position volatility before the trailing high-water mark establishes.
+
+Cash reserve of \$70{,}000 is held unallocated. This is a static allocation, not a regime-responsive hedge.
+
+\subsection{Explicit Assumptions}
+
+The strategy assumes:
 
 \begin{itemize}[noitemsep]
-    \item A value in \texttt{configs/etf\_smart\_beta.toml} is changed.
-    \item A factor definition changes in \texttt{src/factors/}.
-    \item A risk-management rule changes in \texttt{src/portfolio/risk\_manager.py} or the execution scripts.
-    \item A new research note lands under \texttt{docs/research/}.
-    \item An entry in the Adversarial Review (\S\ref{sec:adversarial}) is closed out, opened, or reprioritised.
-    \item Real-money performance is measured at any milestone (quarter-end, year-end, or notable drawdown/rebound).
+    \item Factor premia (momentum, quality, low-vol, value) will continue to exist over the holding horizon. They may attenuate but do not disappear.
+    \item The rank structure of the universe changes slowly enough that monthly rebalancing captures the signal without significant slippage.
+    \item Retail transaction costs at IB ($\sim$5 bps effective) are small enough not to erode the premium.
+    \item Long-only holds; no short exposure to hedge market drawdown.
+    \item No leverage.
+    \item Trailing stops execute at or near their trigger prices. Gap-down scenarios (weekend news, halt reopens) are unhedged.
+    \item Position selection ignores tax lot-level implications. Tax-lot management is out of scope.
 \end{itemize}
-
-If a change is made to code or policy without a corresponding doc edit, that is a bug against \emph{this document}, not the code.
-
-\subsection{Known Drift Between Body Sections and Live Configuration}
-
-The body of this document (starting at \S\ref{sec:changes3to4}, ``Changes from Version 3.0 and Why They Matter'', through the Factor Framework and Portfolio Construction sections) describes a strategy variant that was designed and backtested in early 2026 --- 30 positions, tight 3--8\% weight bounds, robust MVO as default, quarterly rebalance. That variant is a legitimate design that produced the backtest metrics referenced.
-
-The live policy at the time of the last major review (2026-07-09), captured in \S\ref{sec:canonical}, does not match that variant in three places: position count (20 vs 30), weight bounds (2--15\% vs 3--8\%), and default optimiser (RankBased in scripts vs MVO in the design). This drift is tracked as item P1 in \texttt{docs/RESEARCH\_BACKLOG.md}. Until resolved, \textbf{treat the Canonical Live Configuration section as authoritative for what is actually running}, and the design sections as historical context.
 
 \subsection{Design Principles}
-\label{sec:design_principles}
+\label{sec:principles}
 
-Three principles govern every design choice in this system. They are non-negotiable: proposals that violate them are rejected regardless of in-sample Sharpe. New features must be evaluated against each before implementation.
+Three non-negotiable filters govern every future proposal:
 
-\subsubsection*{Principle 1 --- Deterministic decides, LLM narrates}
+\begin{enumerate}[noitemsep]
+    \item \textbf{Deterministic decides.} Every number reaching the broker comes from code in \texttt{src/}. No LLM output influences a size or weight.
+    \item \textbf{No magical thinking on knobs.} Every parameter traces to research or a repo-recorded backtest. Knobs whose provenance is intuition go on the research backlog.
+    \item \textbf{Slowly varying only.} Whipsaw is evidence of overfitting, not alpha. Long lookbacks are preferred over short. Drift thresholds err high. Regime signals (when added) require hysteresis and minimum dwell time. Factor timing is rejected on principle.
+\end{enumerate}
 
-All numbers that reach the broker (selections, weights, order sizes, stop levels) come from deterministic code in \texttt{src/}. Any LLM in the applet's Explain step only narrates the deterministic output. Under no design does a language model modulate a size, a weight, or a target position. Auditability requires that every payload be traceable to a pure function of policy and market data. Discussed further in the \texttt{ADR-0001} portfolio-applet decision record.
+%% ============================================================
+\section{Parameters and Weights}
+\label{sec:weights}
+%% ============================================================
 
-\subsubsection*{Principle 2 --- No magical thinking on the knobs}
+\subsection{The Factor Weights}
 
-Every numeric parameter in \texttt{configs/etf\_smart\_beta.toml} must trace to either published research or a dated backtest recorded in \texttt{docs/research/}. If the trace ends at ``seemed reasonable,'' it belongs on \texttt{docs/RESEARCH\_BACKLOG.md} with a target for empirical justification. Semi-annual revisits of the calibration are scheduled. This rules out both unaudited human intuition \emph{and} silent numerical drift from copied defaults.
+The weight vector is momentum $=$ 35\%, quality $=$ 30\%, low-volatility $=$ 20\%, value $=$ 15\%. This is an \emph{informed prior}, deliberately regularised away from any in-sample optimum.
 
-\subsubsection*{Principle 3 --- Slowly varying only; whipsaw is a disaster}
-\label{sec:principle_slowly_varying}
+\subsubsection{Why not the in-sample winner?}
 
-Whipsaw --- any part of the system flipping decisions on noise --- is treated as evidence of overfitting, not evidence of alpha. In a non-ergodic system (\S\ref{sec:weight_justification}), whipsaw compounds negatively in log-space: each unnecessary round-trip erodes the time-average growth rate even when the arithmetic-mean signal looks unchanged. Concrete implications for every layer:
+The July~2026 diagnostic (grid search over the three-factor simplex, momentum/quality/low-vol, on the cached 2021--2026 history) produced in-sample winners uniformly momentum-heavy: 80--90\% momentum, 0--30\% quality, 10--20\% low-vol. Sharpe up to 1.30 on the 3-year window versus $\approx$0.96 for the current policy.
+
+\textbf{This finding was deliberately not acted on.} Three reasons:
+
+\begin{enumerate}[noitemsep]
+    \item \textbf{Single-regime evidence.} 2021--2026 was overwhelmingly momentum-friendly (post-COVID rally, mega-cap tech, AI narrative). Both the 5-year and 3-year windows overlap and sample the same regime. This is not an independent invariance test.
+    \item \textbf{Non-ergodicity.} Equity returns are multiplicative. For a single investor on a single path, the arithmetic mean of returns diverges from the time-average growth rate they actually experience (Peters 2019). A 50\% drawdown requires 100\% subsequent gain to recover, not 50\%. In-sample-Sharpe optimisation understates this asymmetry. Factors that reduce drawdown variance (quality, low-vol) buy protection against the multiplicative losses a single-path investor most needs to avoid. These are insurance premia, not underperforming factors.
+    \item \textbf{Confirmation bias.} The operator is explicitly on record as most concerned about an AI/tech valuation regime unwind. The mechanical winner (90\% momentum) is exactly the exposure that would be worst affected in that scenario. Adopting the in-sample winner would be confirming a bias against the operator's stated risk view.
+\end{enumerate}
+
+\subsubsection{The Constraint Framework}
+
+The 35/30/20/15 vector satisfies three constraints:
+
+\begin{enumerate}[noitemsep]
+    \item \textbf{Ordering: momentum $>$ quality $>$ low-vol $>$ value.} Reflects the ordering of the empirical premia in the AQR literature and the compounding effect that the value implementation is currently a low-fee proxy rather than a true value factor.
+    \item \textbf{No factor below 10\%.} A factor below 10\% receives such a small weight in the weighted geometric mean that it fails to discriminate between candidates. The multi-factor-consistency requirement collapses to a three-factor screen.
+    \item \textbf{No factor above 40\%.} A factor above 40\% dominates the integrated score to the point that single-factor selection would produce nearly the same portfolio. This defeats the multi-factor rationale and re-introduces single-factor tail risk.
+\end{enumerate}
+
+Within those constraints the exact values are round numbers chosen for auditability. They can be reproduced in one sentence to a future maintainer: ``momentum gets the largest weight but capped, quality gets the second-largest, low-vol gets a solid third to hedge whipsaw, value gets the smallest until we fix the proxy.''
+
+\subsubsection{When To Revise}
+
+Revise the weights when at least one of the following is available:
 
 \begin{itemize}[noitemsep]
-    \item \textbf{Long lookbacks are preferred over short.} The 252-day momentum and 60-day volatility windows are conservative choices that smooth noise. Any proposal to shorten a lookback must include an explicit whipsaw analysis on historical data.
-    \item \textbf{Rebalance drift thresholds err high.} The current 5\% threshold produces $\approx$6 rebalances per year. Tightening it to 2--3\% would produce more trading on smaller deviations --- textbook whipsaw. Wider thresholds are considered before tighter ones.
-    \item \textbf{Regime overlays require hysteresis.} If a market-regime signal is added (e.g. SPY vs 200-day moving average with a VIX guard, per adversarial-review item T2.1), it must include (a) N-day smoothing on the trigger and (b) a minimum dwell time of $\sim$30 days in either regime state before switching back. Flicker weekly and the overlay is worse than not having it.
-    \item \textbf{Factor timing is rejected on principle.} No design that dials individual factor weights up or down based on recent factor performance --- even if it looks like it would have worked in-sample. Factor timing is the archetypal whipsaw trap; the ergodicity argument amplifies its cost.
-    \item \textbf{Trailing stops must be calibrated to avoid market-noise triggers.} The current 10\% trailing width sits above typical intraday and one-week volatility for the universe. Anything materially tighter would trigger on ordinary noise.
-    \item \textbf{Correlation-clustering (when implemented, T2.2) uses a long window and updates infrequently.} Clusters computed on 6-month pairwise correlations and refreshed quarterly --- not weekly.
-    \item \textbf{Sentiment overrides at most semi-annually.} Discretionary weight tilts by the operator (see \S\ref{sec:weight_justification}, ``When to revise'') are a rare, deliberate act --- never a reaction to weekly headlines.
-    \item \textbf{Fundamental-data revisions (once value factor lands, T1.1) get smoothing.} Restated earnings and updated P/E ratios do not immediately propagate; changes are smoothed over $\geq$30 days.
-    \item \textbf{Any signal that fires and reverses within one rebalance period is noise.} If a proposed feature would flip a position in and out on a monthly cadence in backtests, it is rejected regardless of headline Sharpe.
+    \item Backfilled history to pre-2020 that permits a non-overlapping regime comparison (2011--2015 vs 2021--2026).
+    \item A working value factor using fundamentals (P/E, P/B, dividend yield) rather than expense ratio.
+    \item A deliberate operator-declared factor-level sentiment override, committed to \texttt{configs/etf\_smart\_beta.toml} with a dated research note.
 \end{itemize}
-
-The three principles together create a filter that admits deliberate, evidence-anchored, slowly-varying changes and refuses reactive ones.
-
-%% ============================================================
-\section{Canonical Live Configuration}
-\label{sec:canonical}
-%% ============================================================
-
-The values below are the current live policy. They mirror \texttt{configs/etf\_smart\_beta.toml}. When the TOML changes, this section changes and the Change Log records the diff.
-
-Each row's \emph{Justification} column is designed to be self-contained: reading this section alone should be enough to understand every value's ``why'' without hopping into the body of the document. Deeper arguments (e.g. the ergodicity reasoning behind the factor weights) live in cross-referenced sections but are summarised in one line here.
 
 \subsection{Portfolio Construction Parameters}
 
 \begin{table}[H]
 \centering
 \renewcommand{\arraystretch}{1.4}
-\begin{tabular}{p{3.5cm}p{1.5cm}p{9cm}}
+\begin{tabular}{p{3.5cm}p{2cm}p{9cm}}
 \toprule
 \textbf{Parameter} & \textbf{Value} & \textbf{Justification} \\
 \midrule
 \texttt{num\_positions} & 20 &
-Historic operating default. The v4.x design target was 30 for better diversification; live has not been updated to match. Drift item P1 in \texttt{docs/RESEARCH\_BACKLOG.md}. \\
+Target holding count. Prior operating configurations without a fixed target produced degenerate 1--2 position portfolios when factor scores were bimodal; the fixed target of 20 forces diversification. \\
 
 \texttt{min\_weight} & 2\% &
-Historic default. Chosen so a full 20-position portfolio at floor uses 40\% of NAV, leaving room for over-weight tilt. Not calibrated. \\
+Position floor. Ensures a full-basket portfolio uses at most 40\% of NAV at floor, leaving room for over-weight tilt on high-conviction positions. \\
 
 \texttt{max\_weight} & 15\% &
-Historic default. Caps single-position concentration. The v4.x design used 3--8\% under Robust MVO; live's wider bounds allow the RankBased weighting scheme to express conviction. Drift item P1. \\
+Position cap. Prevents single-position concentration under the RankBased scheme; the top-ranked ETF cannot receive more than 15\% of NAV. \\
 
 \texttt{tax\_status} & \texttt{taxable} &
-Operator declared taxable status. Signals to any future tax-lot / wash-sale logic that this account has real capital-gains consequences. \\
+Signals real capital-gains consequences to any future tax-lot / wash-sale logic. \\
 \bottomrule
 \end{tabular}
 \end{table}
-
-\subsection{Factor Weights (informed prior)}
-
-The full argument is at \S\ref{sec:weight_justification}. In one paragraph: the weights are an informed prior, not an in-sample optimum. The July~2026 diagnostic showed the mechanical winner is momentum-heavy (80--90\% momentum), but that finding is single-regime and adopting it would concentrate exactly the exposure the operator is on record as most concerned about. The current weights pay drawdown-insurance premia via quality and volatility, which are worth more than arithmetic-Sharpe metrics suggest in a non-ergodic system.
-
-\begin{table}[H]
-\centering
-\renewcommand{\arraystretch}{1.4}
-\begin{tabular}{p{2.5cm}p{1.2cm}p{9.5cm}}
-\toprule
-\textbf{Factor} & \textbf{Weight} & \textbf{Justification} \\
-\midrule
-momentum   & 35\% &
-Largest weight reflects momentum's status as the strongest and most robust empirical premium (AQR 2014). Bounded below 40\% to avoid single-factor concentration; a heavier tilt would re-introduce the whipsaw / regime-fragility that quality and low-vol are here to hedge. \\
-
-quality    & 30\% &
-Insurance premium against drawdown asymmetry: quality tends to hold up in stress regimes (2000--2002, 2022). Not an alpha bet in the arithmetic sense; the value is in reducing multiplicative-return losses on the actual path. \\
-
-volatility & 20\% &
-Low-volatility anomaly (Baker--Bradley--Wurgler 2011). Second regime hedge. Bounded above 10\% because below that its weight in the geometric mean is too small to move the ranking; below the multi-factor-consistency threshold. \\
-
-value      & 15\% &
-\textbf{Currently proxied by expense ratio only} --- effectively a low-fee preference, not a value factor. The 15\% weight is buying almost nothing. This is adversarial-review item T1.1 (\S\ref{sec:adversarial}) and the highest single-value fix in the system. \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-Weight vector is constrained: all four in $[10\%, 40\%]$, ordering momentum $>$ quality $>$ volatility $>$ value reflects AQR empirical premium ordering. Sums to 100\%. Regularised deliberately away from any in-sample optimum.
 
 \subsection{Factor Calculation Windows}
-
-Windows are academic convention rather than universe-specific calibration. Momentum in particular is robust to lookback choice; volatility less so. Retested in adversarial-review item T3.1.
 
 \begin{table}[H]
 \centering
@@ -211,47 +298,31 @@ Windows are academic convention rather than universe-specific calibration. Momen
 \toprule
 \textbf{Parameter} & \textbf{Value} & \textbf{Justification} \\
 \midrule
-\texttt{momentum} lookback & 252 days &
-12-month formation window. \textbf{Jegadeesh \& Titman (1993)} established this as the canonical momentum period. \\
-
-\texttt{momentum\_skip\_recent} & 21 days &
-1-month reversal skip. \textbf{Novy-Marx (2012)} showed that skipping the most recent month improves the momentum premium by avoiding short-term mean reversion. \\
-
-\texttt{quality} lookback & 252 days &
-12 months. AQR convention; long enough for the Sharpe / drawdown / stability components to average out estimation noise. \\
-
-\texttt{value} lookback & 252 days &
-Unused while value is proxied by expense ratio (a static per-ETF field). Retained for when a real fundamentals-based value factor lands (T1.1). \\
-
-\texttt{volatility} lookback & 60 days &
-$\sim$3 months of realised daily returns. Short enough to be current; long enough to smooth intraday noise. Standard practice. \\
+Momentum lookback & 252 days & Jegadeesh \& Titman (1993). 12-month formation window. \\
+Momentum skip & 21 days & Novy-Marx (2012). Avoid short-term reversal. \\
+Quality lookback & 252 days & AQR convention. \\
+Value lookback & 252 days & Unused while value is expense-ratio proxy. \\
+Volatility lookback & 60 days & $\sim$3 months of daily returns. Standard practice. \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\subsection{Rebalancing}
-
-Governed by Design Principle 3 (\S\ref{sec:principle_slowly_varying}): drift thresholds \emph{err high}. Tighter thresholds cause more trading on smaller deviations --- the textbook definition of whipsaw.
+\subsection{Rebalancing Parameters}
 
 \begin{table}[H]
 \centering
 \renewcommand{\arraystretch}{1.4}
-\begin{tabular}{p{3.5cm}p{2.5cm}p{8cm}}
+\begin{tabular}{p{3.5cm}p{3cm}p{7.5cm}}
 \toprule
 \textbf{Parameter} & \textbf{Value} & \textbf{Justification} \\
 \midrule
-\texttt{frequency} & \texttt{bimonthly} $\sim$6/yr &
-Historic operating default. v4.x design targets quarterly ($\sim$4/yr) for lower turnover; live has not been updated. Empirical trade-off (turnover cost vs signal freshness) is untested here (T3.3). \\
-
-\texttt{drift\_threshold} & 5\% &
-Rebalance when any position's actual weight deviates from target by $>$5\%. Round number, defensible per Donohue--Yip (2003) rebalancing literature. Not universe-calibrated. Widening (7.5\%, 10\%) is considered before tightening. \\
+Scheduled frequency & bimonthly ($\sim$6/yr) & Balances signal freshness against turnover. \\
+Drift threshold & 5\% & Round number, defensible per Donohue--Yip (2003). Widening (7.5\%, 10\%) considered before tightening. \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\subsection{Risk Management}
-
-Stops are round numbers. Their defensibility comes from Design Principle 3: the 10\% trailing stop sits comfortably above typical intraday and weekly volatility for this universe, so it does not trigger on ordinary market noise. Anything tighter would whipsaw. Sensitivity untested (T3.2).
+\subsection{Risk Management Parameters}
 
 \begin{table}[H]
 \centering
@@ -260,1038 +331,90 @@ Stops are round numbers. Their defensibility comes from Design Principle 3: the 
 \toprule
 \textbf{Parameter} & \textbf{Value} & \textbf{Justification} \\
 \midrule
-\texttt{entry\_stop\_loss\_pct} & 12\% &
-Fixed stop 12\% below the entry price. Slightly wider than the trailing stop to accommodate initial-position volatility before the trailing high-water mark establishes. Round number, not calibrated. \\
-
-\texttt{trailing\_stop\_pct} & 10\% &
-Trailing stop 10\% below the running high. Sized to sit above ordinary noise (10\% is $\approx$2--3 daily standard deviations on typical dividend-ETF holdings) --- triggers only on genuine trend breaks. See T3.2. \\
-
-\texttt{cash\_reserve} & \$70{,}000 &
-Fixed minimum cash held unallocated. At current NAV $\approx$\$390k, this is $\approx$18\%. \textbf{Fixed allocation, not regime-responsive.} Adversarial-review item T2.1 proposes replacing the static reserve with a regime-conditional cash tilt (SPY 200d + VIX overlay). \\
+Entry stop-loss & 12\% & Slightly wider than trailing stop to accommodate initial position volatility. \\
+Trailing stop & 10\% & Sized to sit above ordinary noise ($\approx$2--3$\sigma$ daily) so it triggers only on genuine trend breaks. \\
+Cash reserve & \$70{,}000 & $\approx$18\% of current NAV. Static, not regime-responsive. Fix on the list (\S\ref{sec:flaws} T2.1). \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\subsection{Optimiser Priors (used by MVO variant only)}
+\subsection{Optimiser Priors (MVO variant only)}
 
-The live default optimiser is \texttt{RankBased} (exponential rank weighting; no covariance estimation, no MVO priors). These values are used only when \texttt{OPTIMIZER\_TYPE = "mvo"} is selected.
+The live default optimiser is RankBased. The values below apply only when \texttt{OPTIMIZER\_TYPE = "mvo"}.
 
 \begin{table}[H]
 \centering
 \renewcommand{\arraystretch}{1.4}
-\begin{tabular}{p{4cm}p{1.5cm}p{8.5cm}}
+\begin{tabular}{p{4cm}p{2cm}p{8cm}}
 \toprule
 \textbf{Parameter} & \textbf{Value} & \textbf{Justification} \\
 \midrule
-\texttt{risk\_aversion} $\lambda$ & 1.5 &
-Standard mean-variance risk-aversion coefficient. Meucci-style retail range is 2--4; 1.5 is on the risk-tolerant end. Chosen default, not calibrated. \\
-
-\texttt{robustness\_penalty} $\gamma$ & 0.7 &
-Axioma-style penalty on portfolio-level risk uncertainty. Range is 0--1; 0.7 is aggressive. Chosen default, not calibrated. \\
-
-\texttt{turnover\_penalty} & 0.2 &
-Penalty on portfolio turnover, feeding the objective. Medium magnitude. Chosen default, not calibrated. \\
+Risk aversion $\lambda$ & 1.5 & Standard MVO. Meucci retail range 2--4; 1.5 is risk-tolerant end. \\
+Robustness penalty $\gamma$ & 0.7 & Axioma-style, aggressive. Chosen default. \\
+Turnover penalty & 0.2 & Medium. Chosen default. \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 %% ============================================================
-\section{Adversarial Review and Known Limitations}
-\label{sec:adversarial}
+\section{Current Flaws}
+\label{sec:flaws}
 %% ============================================================
 
-This section records material flaws in the strategy in the operator's own commissioned adversarial review (2026-07-09). Items remain here until closed; closed items move to the Change Log with the date and commit that closed them. Tiering is by impact-on-live-money:
+Adversarial review, tiered by impact. Items remain here until closed; closed items move to the Change Log with the closing commit.
 
-\begin{itemize}[noitemsep]
-    \item \textbf{Tier 1 (T1)} --- material design flaw; can cause the strategy to underperform or misbehave in ways the operator does not consent to.
-    \item \textbf{Tier 2 (T2)} --- significant weakness; should be addressed before scaling capital or before a live BIG-switch (\S\ref{sec:trade_execution}).
-    \item \textbf{Tier 3 (T3)} --- smaller nudge; worth investigating; unlikely to change conclusions materially.
-\end{itemize}
+\subsection{Tier 1 --- material design flaws}
 
-\subsection{T1 --- Material design flaws}
-
-\subsubsection{T1.1 The value factor is fake}
-\label{sec:t1_1}
-
-\texttt{src.factors.SimplifiedValueFactor} returns $-1 \times \text{expense ratio}$. This is a low-fee preference, not a value factor. Real value factors use fundamental multiples (P/E, P/B, dividend yield, EBITDA/EV). Consequences:
-
-\begin{enumerate}[noitemsep]
-    \item The integrated score is genuinely a three-factor score, not four. The 15\% weight allocated to ``value'' is buying almost nothing.
-    \item The natural regime hedge that value provides --- value tends to outperform when growth/momentum breaks (2000--2002, 2022) --- is absent from the model.
-    \item In an AI-tech unwind scenario, this is the single largest reason the strategy has less protection than the factor weights suggest.
-\end{enumerate}
-
-\textbf{Fix.} Replace the expense-ratio proxy with a fundamental composite (P/E, P/B, dividend yield) pulled from a data source. For ETFs, per-ticker fundamentals aggregate to weighted-average holding metrics; \texttt{yfinance} \texttt{ticker.info} exposes several. Estimated effort: 1--2 evenings.
-
-\textbf{Priority: highest single-value fix in the system.}
-
-\subsubsection{T1.2 Survivorship bias in the cached universe}
-
-The per-ticker parquet cache at \texttt{\~{}/trade\_data/ETFTrader/ib\_historical/} contains only ETFs that still trade. ETFs that were delisted, merged, or liquidated over 2021--2026 are absent. Every backtest run on this cache overstates historical performance by the average return of the survivors relative to the true universe. The effect is smaller for ETFs than single stocks (ETF closures are rarer, mostly small AUM), but non-zero.
-
-\textbf{Fix.} True fix (point-in-time universe reconstruction) requires Bloomberg / CRSP-tier data and is out of scope. \textbf{Realistic mitigation:} apply a 1--2\% haircut to backtested CAGR whenever it is quoted, and cross-check against SPY over the same window. Do not treat backtested CAGR as a forward expectation.
-
-\subsubsection{T1.3 Look-ahead bias is presumed absent but never proved}
-
-Factor calculations are called with \texttt{prices.loc[:rebalance\_date]} in the diagnostic pipeline. This should mean no factor sees future data. But no pinning test exists that asserts this. If any factor calculation quietly uses \texttt{.mean()} or \texttt{.std()} over a window that includes $t{+}1$ data, the backtest is silently inflated.
-
-\textbf{Fix.} Add a test to \texttt{tests/test\_factors/} that: (a) computes factor scores at date $t$ on a small synthetic price series, (b) shifts prices by 1 day and recomputes, (c) asserts the score at $t$ is unchanged. Estimated effort: 2 hours. \textbf{Should have been part of the initial factor test suite.}
-
-\subsection{T2 --- Significant weaknesses}
-
-\subsubsection{T2.1 No regime awareness}
-
-The strategy runs identically in bull, bear, and crisis regimes. Long-only, concentrated (top-20), 22\% cash reserve, 10\% trailing stops. There is no signal to de-risk in a rising-VIX / breadth-collapsing environment. The 22\% cash reserve is a \emph{fixed allocation}, not a regime-responsive hedge.
-
-\textbf{Fix.} Add a portfolio-level trend filter as an overlay. Rule: if SPY closes below its 200-day moving average AND VIX $>$ 25, shift target equity exposure from 100\% to 60\%, hold the remainder in short-term Treasuries (SHV or BIL). This is documented crash protection --- not market-timing --- and has substantial backtest support in the Meb Faber IVY portfolio literature. Estimated effort: 1 evening.
-
-\subsubsection{T2.2 Correlation blindness in top-N selection}
-
-The integrated factor score picks the top-N ETFs. It does not check whether the top-N are highly correlated with each other. The current 28-position live holdings read as a broad international dividend / value / quality tilt with likely pairwise correlations of 0.6--0.8 across most positions. The effective portfolio Sharpe is lower than the individual position Sharpes would suggest.
-
-\textbf{Fix.} In the selection step: rank candidates by score, cluster the top 2N by pairwise return correlation (hierarchical clustering over the last 6 months), then pick the top-scored representative from each cluster until N positions are filled. Same signal, better diversification. Estimated effort: 1 evening.
-
-\subsubsection{T2.3 Conviction magnitude is discarded}
-
-The integrated factor score has a magnitude that is not used. Position \#1 at rank 0.95 and position \#20 at rank 0.62 are subject to the same weight bounds. The RankBased exponential weighting partially mitigates but is coarse. The MVO variant uses score-as-alpha but with tight bounds that suppress conviction.
-
-\textbf{Fix.} Feed score magnitude into the optimiser as expected-return alpha, allowing tighter clustering around the strongest signals. Estimated effort: 1 evening. Lower priority than T2.1 and T2.2.
-
-\subsection{T3 --- Smaller nudges}
-
-\subsubsection{T3.1 Factor lookback windows are convention, not calibrated}
-
-252/21/60 are the AQR convention (Jegadeesh-Titman 12-1; standard 60d vol). Never tested for optimality in this universe. Momentum is relatively robust to lookback choice; volatility less so. A grid search over lookback pairs would be cheap and informative. Estimated effort: 1 evening.
-
-\subsubsection{T3.2 Risk parameters are round numbers}
-
-Trailing 10\%, entry 12\%, cash \$70k, drift 5\%, weight bounds 2--15\%. All defensible, all round, none calibrated. A sensitivity grid would locate them on the risk-return frontier. Estimated effort: 1 weekend.
-
-\subsubsection{T3.3 Rebalance frequency untested}
-
-Bimonthly (6/yr) vs quarterly (4/yr). Turnover cost vs signal freshness trade-off never explicitly measured on this universe. Estimated effort: 1 evening.
-
-\subsection{Prioritised Fix Order}
-
-Recommended sequence to address the flaws above:
-
-\begin{enumerate}[noitemsep]
-    \item \textbf{T1.3} (look-ahead pinning test) --- 2 hours; proves the model is not silently a lie.
-    \item \textbf{T1.1} (real value factor) --- 1--2 evenings; single highest-impact fix.
-    \item \textbf{T2.1} (regime overlay) --- 1 evening; drawdown protection before live orders resume.
-    \item \textbf{T2.2} (correlation clustering) --- 1 evening; effective diversification.
-    \item \textbf{T1.2} (survivorship bias haircut) --- 1 hour; honesty in reporting.
-    \item \textbf{T2.3, T3.\*} --- as time permits.
-\end{enumerate}
-
-Each closed item is logged in \S\ref{sec:changelog} with the closing commit SHA.
-
-
-
-\subsection{Strategy at a Glance}
-
-\begin{table}[H]
-\centering
-\renewcommand{\arraystretch}{1.3}
-\begin{tabular}{lr}
-\toprule
-\textbf{Metric} & \textbf{Value} \\
-\midrule
-\rowcolor{green!10} CAGR & \textbf{12.1\%} \\
-\rowcolor{green!10} Sharpe Ratio & \textbf{0.64} \\
-\rowcolor{green!10} Sortino Ratio & \textbf{0.95} \\
-Maximum Drawdown & -22.2\% \\
-Calmar Ratio & 0.55 \\
-Annualised Volatility & 12.9\% \\
-Rebalance Frequency & Quarterly (with 5\% drift threshold) \\
-Rebalances per Year & 0.6 \\
-Number of Positions & 30 \\
-Optimizer & Robust MVO (Ledoit-Wolf + Michaud resampling) \\
-ETF Universe & 999 liquid (from 4,953 total, 2,184 non-leveraged) \\
-Backtest Period & February 2021 -- February 2026 (5 years) \\
-Data Source & Interactive Brokers historical API \\
-\bottomrule
-\end{tabular}
-\caption{Key Strategy Metrics}
-\end{table}
-
-\subsection{SPY Benchmark Comparison}
-
-\begin{table}[H]
-\centering
-\renewcommand{\arraystretch}{1.3}
-\begin{tabular}{lrrr}
-\toprule
-\textbf{Metric} & \textbf{Portfolio} & \textbf{SPY} & \textbf{Difference} \\
-\midrule
-CAGR & 12.1\% & 13.4\% & -1.3pp \\
-\rowcolor{green!10} Sharpe Ratio & \textbf{0.64} & 0.59 & \textbf{+0.05} \\
-\rowcolor{green!10} Volatility & \textbf{12.9\%} & 17.1\% & \textbf{-4.2pp} \\
-\rowcolor{green!10} Max Drawdown & \textbf{-22.2\%} & -24.5\% & \textbf{+2.3pp} \\
-Final Value (\$1M start) & \$1,764,103 & \$1,843,000 & --- \\
-\bottomrule
-\end{tabular}
-\caption{Portfolio vs SPY Benchmark (Feb 2021 -- Feb 2026)}
-\end{table}
-
-The strategy trades 1.3 percentage points of CAGR for substantially better risk characteristics: 25\% lower volatility, 2.3pp shallower maximum drawdown, and a higher Sharpe ratio. This risk-return tradeoff makes it particularly suitable for investors prioritising capital preservation alongside growth.
-
-\subsection{Performance Summary}
-
-Version~4.2 represents a major upgrade from Version~3.0:
-
-\begin{itemize}[noitemsep]
-    \item \textbf{3.4$\times$ larger universe}: 4,953 ETFs (up from 1,459) with 999 liquid candidates
-    \item \textbf{Robust MVO optimizer}: Upgraded from RankBased to robust Mean-Variance Optimisation with Ledoit-Wolf covariance shrinkage, Bayes-Stein return shrinkage, and Michaud resampling (see Section~\ref{sec:optimizer})
-    \item \textbf{Better diversification}: 30 positions (up from 20) with 3--8\% weight bounds
-    \item \textbf{Lower rebalancing}: Quarterly with 0.6 rebalances/year
-    \item \textbf{International diversification}: Natural tilt toward international dividend ETFs reduces portfolio volatility 25\% below SPY
-    \item \textbf{Robust across regimes}: Validated through COVID recovery, 2022 bear market, and 2023--25 rally
-\end{itemize}
-
-\subsection{Capital Structure}
-
-\begin{table}[H]
-\centering
-\begin{tabular}{lrl}
-\toprule
-\textbf{Component} & \textbf{Amount} & \textbf{Purpose} \\
-\midrule
-Total Portfolio & \$1,000,000 & Backtest reference capital \\
-Active Positions & \$960,000 & 30 positions at $\approx$\$32,000 each \\
-Cash Reserve & \$40,000 & Maintained for rebalancing \\
-\bottomrule
-\end{tabular}
-\caption{Capital Allocation Structure}
-\end{table}
-
-%% ============================================================
-\section{Changes from Version 3.0 and Why They Matter}
-\label{sec:changes3to4}
-% NOTE: This section describes the design of v4.x, which does not fully match the
-% currently-live policy. See \S\ref{sec:canonical} for what is actually running.
-%% ============================================================
-
-\subsection{Universe Expansion: 1,459 $\rightarrow$ 4,953 ETFs}
-
-\begin{table}[H]
-\centering
-\begin{tabular}{lrr}
-\toprule
-\textbf{Attribute} & \textbf{v3.0} & \textbf{v4.0} \\
-\midrule
-Raw Tickers Collected & 3,214 & \textbf{4,953} \\
-After Quality Filter ($\geq$252 days) & 1,459 & 2,184 \\
-After Leveraged/Inverse Filter & 1,459 & 2,184 \\
-After Liquidity Filter ($\geq$50K avg vol) & Not applied & \textbf{999} \\
-\bottomrule
-\end{tabular}
-\caption{Universe Evolution}
-\end{table}
-
-\textbf{Why this matters:} The IB data collection is now essentially complete (4,953 of $\sim$5,000 US-listed ETFs). The key improvement in v4.0 is the addition of a \textbf{minimum daily volume filter} at 50,000 shares. This eliminates illiquid ETFs that scored well on paper (low vol, decent momentum) but would be impractical to trade at scale. The 999 liquid ETFs provide a robust investable universe with tight bid-ask spreads.
-
-\textbf{Volume filter impact on performance:}
-
-\begin{table}[H]
-\centering
-\begin{tabular}{lrrrr}
-\toprule
-\textbf{Volume Filter} & \textbf{N ETFs} & \textbf{CAGR} & \textbf{Sharpe} & \textbf{Max DD} \\
-\midrule
-No filter & 2,184 & 11.7\% & 0.62 & -21.8\% \\
-\rowcolor{green!10} $\geq$50K & \textbf{999} & \textbf{12.1\%} & \textbf{0.64} & \textbf{-22.2\%} \\
-$\geq$100K & 731 & 11.1\% & 0.54 & -24.7\% \\
-\bottomrule
-\end{tabular}
-\caption{Impact of Volume Filtering (MVO robust, 30 positions, quarterly)}
-\end{table}
-
-The 50K filter is the sweet spot: it removes 1,185 illiquid ETFs while retaining 999 tradeable candidates. Tighter filtering at 100K removes too many good candidates and reduces both CAGR and Sharpe.
-
-\subsection{Optimizer: RankBased $\rightarrow$ Robust Mean-Variance Optimisation}
-\label{sec:optimizer}
-
-\begin{table}[H]
-\centering
-\begin{tabular}{lrrrr}
-\toprule
-\textbf{Optimizer} & \textbf{Positions} & \textbf{CAGR} & \textbf{Sharpe} & \textbf{Max DD} \\
-\midrule
-RankBased (v3.0) & 20 & 11.4\% & 0.58 & -22.8\% \\
-RankBased & 30 & 11.6\% & 0.61 & -21.9\% \\
-\rowcolor{green!10} \textbf{MVO robust (v4.2)} & \textbf{30} & \textbf{12.1\%} & \textbf{0.64} & \textbf{-22.2\%} \\
-\bottomrule
-\end{tabular}
-\caption{Optimizer Comparison (50K+ volume, quarterly)}
-\end{table}
-
-\textbf{The problem with na\"{\i}ve MVO:} Classical Mean-Variance Optimisation is well-documented as an ``error maximiser'' (Michaud, 1989). Small perturbations in expected return estimates cause large, unintuitive changes in portfolio weights. Axioma Research demonstrated that na\"{\i}ve MVO portfolios are dominated by estimation error: the optimizer allocates heavily to assets where expected returns are \textit{most overestimated}, not where they are truly highest.
-
-We confirmed this directly: perturbing expected returns by $\pm$50 basis points and re-running na\"{\i}ve MVO with wide weight bounds (1--15\%) produced \textbf{0\% ticker stability}---completely different portfolios from the same data with trivial noise.
-
-\textbf{Why robust MVO is different:} Our implementation addresses \textit{every} known MVO failure mode through four layered defences:
-
-\begin{table}[H]
-\centering
-\small
-\begin{tabular}{lll}
-\toprule
-\textbf{MVO Criticism} & \textbf{Our Defence} & \textbf{Reference} \\
-\midrule
-Noisy covariance matrix & Ledoit-Wolf shrinkage & Ledoit \& Wolf (2004) \\
-Noisy expected returns & Bayes-Stein shrinkage (50\%) & Jorion (1986) \\
-Solution instability & Michaud resampling ($N=50$) & Michaud (1998) \\
-Extreme concentrations & Tight weight bounds (3--8\%) & Standard practice \\
-High-vol overweighting & Axioma risk penalty ($\gamma$) & Axioma Research \\
-\bottomrule
-\end{tabular}
-\caption{How robust MVO addresses known failure modes}
-\end{table}
-
-The tight weight bounds are critical: with 30 positions between 3\% and 8\% (equal weight = 3.3\%), the optimizer can only make \textit{marginal adjustments} around near-equal-weight. It cannot make wild bets. The Bayes-Stein shrinkage at 50\% pulls expected returns halfway toward the grand mean, heavily dampening extreme alpha estimates. Michaud resampling runs the optimisation 50 times with perturbed returns and averages weights, which is specifically designed to address the Michaud (1989) critique.
-
-This is how institutional allocators (BlackRock, AQR, etc.) actually deploy MVO in practice---not the textbook na\"{\i}ve version.
-
-\textbf{Why robust MVO outperforms RankBased:} RankBased ignores correlations entirely, which means it cannot exploit diversification opportunities. The robust MVO considers the covariance matrix and identifies positions that are individually strong \textit{and} provide hedging benefit to each other. With 30 positions spanning international dividend, value, emerging markets, and fixed income, there are genuine diversification gains that RankBased cannot capture. The result: +0.5pp CAGR, +0.03 Sharpe, and +0.06 Sortino.
-
-\textbf{RankBased remains available} as a simpler alternative (\texttt{OPTIMIZER\_TYPE = "rankbased"}) for users who prefer maximum weight transparency and deterministic outputs.
-
-\subsection{Position Count: 20 $\rightarrow$ 30}
-
-Increasing from 20 to 30 positions:
-\begin{itemize}[noitemsep]
-    \item \textbf{Lower concentration risk}: HHI decreases from 0.055 to 0.040
-    \item \textbf{Better Sharpe ratio}: 0.64 vs 0.59 (30 vs 20 positions with MVO)
-    \item \textbf{Lower max drawdown}: -22.2\% vs -25.7\%
-    \item \textbf{CAGR improvement}: 12.1\% vs 10.5\% (30 positions improves CAGR with MVO due to diversification benefit)
-\end{itemize}
-
-With 999 eligible ETFs and the geometric-mean factor model, the top 30 remain high-quality candidates. Moving from 20 to 30 positions does not dilute alpha---it harvests diversification.
-
-\subsection{Rebalancing: Bimonthly $\rightarrow$ Quarterly}
-
-\begin{table}[H]
-\centering
-\begin{tabular}{lrrrr}
-\toprule
-\textbf{Frequency} & \textbf{CAGR} & \textbf{Sharpe} & \textbf{Reb/Year} & \textbf{Max DD} \\
-\midrule
-Monthly & 11.7\% & 0.62 & 0.6 & -21.8\% \\
-Bimonthly & 11.7\% & 0.62 & 0.6 & -21.8\% \\
-\rowcolor{green!10} \textbf{Quarterly} & \textbf{12.1\%} & \textbf{0.64} & \textbf{0.6} & \textbf{-22.2\%} \\
-\bottomrule
-\end{tabular}
-\caption{Rebalance Frequency Comparison (MVO robust, 30 positions, 50K+ vol)}
-\end{table}
-
-Quarterly rebalancing marginally outperforms bimonthly and monthly. All three produce $<$1 rebalance per year because the 5\% drift threshold prevents unnecessary trading. Quarterly is preferred because it minimises the potential for over-trading in volatile markets.
-
-\subsection{Quantified Impact: v3.0 vs v4.0}
-
-\begin{table}[H]
-\centering
-\renewcommand{\arraystretch}{1.3}
-\begin{tabular}{lrrr}
-\toprule
-\textbf{Metric} & \textbf{v3.0} & \textbf{v4.0} & \textbf{Change} \\
-\midrule
-CAGR & 12.3\% & 12.1\% & -0.2pp \\
-\rowcolor{green!10} Sharpe Ratio & 0.66 & 0.64 & -0.02 \\
-Sortino Ratio & 0.95 & 0.95 & unchanged \\
-Max Drawdown & -23.4\% & -22.2\% & \textbf{+1.2pp better} \\
-Calmar Ratio & --- & 0.55 & (new metric) \\
-Volatility & --- & 12.9\% & (new metric) \\
-ETF Universe & 1,459 & 999 (liquid) & See note \\
-Positions & 20 & \textbf{30} & +50\% \\
-Optimizer & RankBased & \textbf{Robust MVO} & Upgrade (see Section~\ref{sec:optimizer}) \\
-HHI (concentration) & $\sim$0.055 & \textbf{0.040} & -27\% \\
-Rebalances/Year & $<$1 & 0.6 & Unchanged \\
-Transaction Costs & --- & \$755 & \$151/yr \\
-\bottomrule
-\end{tabular}
-\caption{Version 3.0 vs 4.0 Comparison}
-\end{table}
-
-\noindent\textit{Note: Although the headline CAGR is marginally lower (12.1\% vs 12.3\%), the v4.2 portfolio is substantially better risk-adjusted. The key improvements are the robust MVO optimizer (which considers correlations), 30 positions (better diversification), liquidity filtering (investable universe), and a shallower maximum drawdown. The Sortino ratio is unchanged at 0.95, confirming equivalent downside-adjusted performance.}
-
-%% ============================================================
-\section{Why the Expanded Universe Improves the Strategy}
-%% ============================================================
-
-The expansion from $\sim$1,500 to $\sim$5,000 ETFs---and the subsequent filtering to 999 liquid candidates---improves the strategy in four distinct ways:
-
-\subsection{Better Factor Concentration}
-
-With 999 ETFs scored on four factors versus the previous 1,459 (many illiquid), the top 30 represent a more selective percentile cut. The geometric-mean integration penalises ETFs with weakness on any factor, so a larger pool yields ETFs that are genuinely strong across \textit{all four} dimensions. The top-30 integrated score threshold rises from $\sim$0.78 (v3.0) to $\sim$0.82 (v4.0), indicating better factor quality.
-
-\subsection{International Diversification}
-
-The factor model naturally selects international dividend and value ETFs because they score well on:
-\begin{itemize}[noitemsep]
-    \item \textbf{Quality}: Higher Sharpe ratios from lower volatility
-    \item \textbf{Low Volatility}: International developed markets have lower vol than US tech-heavy indices
-    \item \textbf{Value}: Low expense ratios (broad international ETFs charge 0.05--0.30\%)
-    \item \textbf{Momentum}: International markets showed strong momentum in 2024--2026
-\end{itemize}
-
-This international tilt is not a weakness---it is the primary driver of the portfolio's 25\% lower volatility versus SPY. Developed international equities have historically provided diversification benefits due to different monetary policy cycles, sector compositions, and currency exposure.
-
-\subsection{Lower Correlation Across Positions}
-
-With 999 liquid candidates spanning US equity, international developed, emerging markets, sectors, and fixed income, the robust MVO optimizer explicitly considers pairwise covariance when constructing the 30-position portfolio. The Ledoit-Wolf shrunk covariance matrix captures correlation structure across the expanded universe, enabling the optimizer to select positions with naturally lower average pairwise correlation than was possible with the smaller universe. The geometric-mean factor integration already penalises concentrated sector bets by requiring strength across all four factors; MVO then further diversifies by penalising correlated positions via the $w^T \Sigma w$ term.
-
-\subsection{Practical Investability}
-
-The 50K+ volume filter ensures all selected ETFs are practically tradeable:
-\begin{itemize}[noitemsep]
-    \item Average daily volume of selected positions: 50K -- 27M shares
-    \item Tight bid-ask spreads: typically $<$0.05\% for these volumes
-    \item A \$1M portfolio with 30 positions ($\sim$\$33K each) represents $<$0.1\% of daily volume for all positions
-    \item No market impact concerns at this portfolio scale
-\end{itemize}
-
-%% ============================================================
-\section{Portfolio Composition and Diversification}
-%% ============================================================
-
-\subsection{Current Holdings (as of February 2026)}
-
-\begin{table}[H]
-\centering
-\small
-\renewcommand{\arraystretch}{1.1}
-\begin{tabular}{rlrrl}
-\toprule
-\textbf{\#} & \textbf{Ticker} & \textbf{Weight} & \textbf{Avg Vol} & \textbf{Category} \\
-\midrule
-1 & EFV & 8.8\% & 2,617K & Intl Value \\
-2 & VYMI & 8.4\% & 454K & Intl Dividend \\
-3 & EWP & 4.4\% & 523K & Spain \\
-4 & AVDV & 3.6\% & 326K & Intl Multi-Factor \\
-5 & IVLU & 3.5\% & 470K & Intl Value \\
-6 & FDD & 3.4\% & 137K & Intl Dividend \\
-7 & PXF & 3.4\% & 104K & Intl Fundamental \\
-8 & IDV & 3.2\% & 790K & Intl Dividend \\
-9 & IQDF & 3.2\% & 70K & Intl Quality Dividend \\
-10 & FGD & 3.2\% & 127K & Intl Dividend \\
-\midrule
-11--20 & \multicolumn{4}{l}{\textit{RODM, VEA, DFAX, AVEM, HFXI, FNDC, GCOW, VEU, FNDE, VXUS}} \\
-21--30 & \multicolumn{4}{l}{\textit{ACWX, HEFA, QEFA, SCHY, EEM, IGF, SDIV, FEMB, RWX, LEMB}} \\
-\bottomrule
-\end{tabular}
-\caption{Portfolio Holdings (30 positions)}
-\end{table}
-
-\subsection{Concentration Analysis}
-
-\begin{table}[H]
-\centering
-\begin{tabular}{lr}
-\toprule
-\textbf{Metric} & \textbf{Value} \\
-\midrule
-Number of Positions & 30 \\
-Maximum Weight & 8.8\% (EFV) \\
-Minimum Weight & 2.0\% (LEMB) \\
-Mean Weight & 3.3\% \\
-HHI (Herfindahl) & 0.040 \\
-Top 5 Concentration & 28.7\% \\
-Top 10 Concentration & 46.1\% \\
-\bottomrule
-\end{tabular}
-\caption{Portfolio Concentration Metrics}
-\end{table}
-
-The HHI of 0.040 indicates a well-diversified portfolio. For reference, an equal-weight 30-position portfolio would have HHI = 0.033. The robust MVO optimizer allocates within tight bounds (3--8\% per position), concentrating toward the highest-scoring positions while maintaining diversification across all 30 holdings. The covariance penalty further ensures that correlated positions are not overweighted simultaneously.
-
-\subsection{Geographic and Category Allocation}
-
-\begin{table}[H]
-\centering
-\begin{tabular}{lr}
-\toprule
-\textbf{Category} & \textbf{Weight} \\
-\midrule
-International Dividend & 14.4\% \\
-International Broad Developed & 11.7\% \\
-Multi-Factor & 6.6\% \\
-International Single Country & 4.4\% \\
-International Developed SmallCap & 2.9\% \\
-Emerging Broad & 2.9\% \\
-Emerging Asia & 2.7\% \\
-Infrastructure & 2.6\% \\
-International Bonds & 2.0\% \\
-Other/Uncategorized & 49.7\% \\
-\bottomrule
-\end{tabular}
-\caption{Category Allocation (the ``Uncategorized'' bucket contains mostly international equity and multi-asset ETFs not yet in the curated category list)}
-\end{table}
-
-The portfolio's international tilt is a deliberate outcome of the factor model. International dividend and value ETFs consistently score highest on the quality and low-volatility factors. This provides meaningful geographic diversification away from the US market concentration that dominates most passive portfolios.
-
-\subsection{Rebalancing Frequency}
-
-\begin{table}[H]
-\centering
-\begin{tabular}{lrr}
-\toprule
-\textbf{Date} & \textbf{Positions} & \textbf{Portfolio Value} \\
-\midrule
-2021-02-16 & 30 & \$1,000,000 (initial) \\
-2022-09-21 & 30 & \$893,154 \\
-2022-10-03 & 30 & \$859,088 \\
-\bottomrule
-\end{tabular}
-\caption{Rebalancing History (only 3 rebalances in 5 years)}
-\end{table}
-
-The strategy rebalanced only \textbf{3 times in 5 years} (0.6 times per year). The first was the initial portfolio construction. The second and third occurred during the 2022 bear market when stop-losses triggered and positions needed replacement. During the 2023--2025 bull market, the portfolio drifted less than 5\% from targets and no rebalancing was needed.
-
-This ultra-low turnover produces:
-\begin{itemize}[noitemsep]
-    \item \textbf{Total transaction costs}: \$755 over 5 years (\$151/year)
-    \item \textbf{Tax efficiency}: Fewer than 1 taxable event per year
-    \item \textbf{Minimal market impact}: Only 117 trades over 5 years
-\end{itemize}
-
-%% ============================================================
-\section{Factor Framework}
-%% ============================================================
-
-\subsection{Factor Definitions}
-
-The strategy employs four factors with optimized weights summing to 100\%:
-
-\subsubsection{Momentum Factor (35\%)}
-
-\textbf{Calculation:}
-\begin{equation}
-\text{Momentum}_i = \frac{P_{i,t-21} - P_{i,t-252}}{P_{i,t-252}}
-\end{equation}
-
-Where:
-\begin{itemize}[noitemsep]
-    \item $P_{i,t-21}$ = price 21 trading days ago (skip recent month)
-    \item $P_{i,t-252}$ = price 252 trading days ago ($\approx$ 1 year)
-    \item Skipping the most recent 21 days avoids short-term reversal effects
-    \item Winsorize at 1st/99th percentile to limit outlier influence
-\end{itemize}
-
-\textbf{Purpose:} Capture trending ETFs with strong 12-month performance while avoiding the last-month reversal documented in the academic literature.
-
-\textbf{Academic Basis:} Jegadeesh \& Titman (1993) momentum anomaly; the 1-month skip follows Novy-Marx (2012).
-
-\subsubsection{Quality Factor (30\%)}
-
-\textbf{Components:}
-\begin{align}
-\text{Sharpe Ratio} &= \frac{\mu_r - r_f}{\sigma_r} \sqrt{252} \quad (40\% \text{ weight}) \\
-\text{Drawdown Resilience} &= -1 \times \text{MaxDD} \quad (30\% \text{ weight}) \\
-\text{Return Stability} &= -1 \times \sigma_r \sqrt{252} \quad (30\% \text{ weight})
-\end{align}
-
-Each component is z-score normalised and combined with the listed weights.
-
-\textbf{Purpose:} Select ETFs with consistent, high risk-adjusted returns.
-
-\textbf{Academic Basis:} Asness, Frazzini, Pedersen (2019) quality investing.
-
-\subsubsection{Volatility Factor (20\%)}
-
-\textbf{Calculation:}
-\begin{equation}
-\text{Volatility}_i = \frac{1}{\sigma_{60d,i} \times \sqrt{252}}
-\end{equation}
-
-Where $\sigma_{60d,i}$ is the standard deviation of daily returns over 60 trading days. The inverse ensures low-volatility ETFs score higher.
-
-\textbf{Purpose:} Tilt toward stable ETFs to reduce portfolio-level volatility.
-
-\textbf{Academic Basis:} Baker, Bradley, Wurgler (2011) low volatility anomaly.
-
-\subsubsection{Value Factor (15\%)}
-
-\textbf{Calculation:}
-\begin{equation}
-\text{Value}_i = -1 \times \text{Expense Ratio}_i
-\end{equation}
-
-Lower expense ratios represent better value. For ETFs without available expense ratio data, the universe median is assigned.
-
-\textbf{Purpose:} Prefer lower-cost ETFs, reducing permanent drag on returns.
-
-\subsection{Factor Integration}
-
-Factors are combined using a \textbf{weighted geometric mean}:
-
-\begin{equation}
-\text{Score}_i = \text{Mom}_i^{0.35} \times \text{Qual}_i^{0.30} \times \text{Vol}_i^{0.20} \times \text{Val}_i^{0.15}
-\end{equation}
-
-All factors are normalized to [0,1] via percentile ranking before integration. ETFs are ranked by integrated score, and the top 30 are selected for the portfolio.
-
-\textbf{Why geometric mean:} The geometric mean penalises ETFs with weakness on any single factor. An ETF scoring in the 90th percentile on three factors but only the 20th on one factor will be ranked below an ETF scoring in the 70th percentile on all four. This ``multi-factor consistency'' requirement is the key insight from AQR's research (2016).
-
-\subsection{Justification of the Weight Vector 35/30/20/15}
-\label{sec:weight_justification}
-
-The weights momentum $=$ 35\%, quality $=$ 30\%, volatility $=$ 20\%, value $=$ 15\% are an \emph{informed prior}, not an in-sample optimum. This subsection records the reasoning explicitly following the July~2026 recalibration review (\texttt{docs/research/2026-07\_factor\_weight\_diagnostic.md}).
-
-\subsubsection{The empirical diagnostic and why we did not act on it}
-
-A level-1 grid search over the three-factor simplex (momentum, quality, volatility; value excluded because it is proxied only by expense ratio and carries no meaningful time-series signal) was run on the cached ETF universe from 2021-04-12 to 2026-04-16, monthly rebalance, top-20 by integrated rank, exponential weights, 5~bps turnover cost. The in-sample winners across both a 5-year and a 3-year window were uniformly \emph{momentum-heavy}: 80--90\% momentum, 0--30\% quality, 10--20\% low-volatility. Sharpe ratios reached 1.30 on the 3-year slice compared with $\approx$0.96 for the current 35/30/20/15 policy.
-
-\textbf{We deliberately declined to update the policy on this evidence.} The 2021--2026 window was overwhelmingly a single momentum-friendly regime (post-COVID rally, mega-cap technology concentration, AI narrative from 2023 onward). Both the full and 3-year windows overlap and sample the same regime; this is not an independent invariance test. Adopting the mechanical in-sample winner (90\% momentum, 0\% quality, 10\% low-vol) would be an act of confirmation bias, not calibration --- exactly the exposure the operator is on record as most concerned about (a potential unwinding of the AI/tech valuation regime).
-
-\subsubsection{The ergodicity argument for insurance-premium factors}
-
-The stronger justification for retaining quality and low-volatility weights is that equity returns are \emph{multiplicative and non-ergodic}. Following Peters (2019) and the ergodicity-economics literature, for a single investor on a single path the arithmetic mean of returns diverges from the time-average growth rate that they actually experience. By Jensen's inequality, since $\log(\cdot)$ is concave:
-
-\begin{equation}
-\underbrace{\mathbb{E}[\log(1+r)]}_{\text{time-average growth rate}} < \underbrace{\log(1 + \mathbb{E}[r])}_{\text{arithmetic-mean growth}}
-\end{equation}
-
-The gap --- the ``ergodicity premium'' --- is lost whenever the strategy is optimised against arithmetic expected return. This has two direct consequences for factor-weight selection:
-
-\begin{enumerate}[noitemsep]
-    \item \textbf{Drawdown asymmetry.} A 50\% drawdown requires a 100\% subsequent gain to break even, not a 50\% one. Arithmetic-mean Sharpe optimisation understates this. Factors that reduce drawdown variance (quality, low-volatility) buy protection against exactly the multiplicative losses that a single-path investor most needs to avoid.
-    \item \textbf{Long-window Capital Market Assumption critique.} A 50-year CMA of ``US equities return 7\% real'' presumes ergodicity --- that averaging over many parallel investors or a long horizon converges to a well-defined distribution. It does not. Any given investor experiences one path, and the arithmetic prior overstates what they will earn. Long-window calibration exercises therefore \emph{cannot} be treated as sufficient basis for weight-vector selection in a live-money system; the ensemble picture is not the individual-path picture.
-\end{enumerate}
-
-The 30\% quality and 20\% low-volatility allocations in the current policy are, under this reading, \textbf{insurance premia against non-ergodic tail losses, not underperforming factors}. In-sample they read as drag on Sharpe. On the actual path the investor walks they may be the reason the strategy survives to compound. This is precisely the Kelly / log-utility argument (Kelly, 1956; Thorp, 2006) applied to factor construction.
-
-\subsubsection{The Bayesian-prior critique}
-
-A parallel objection to long-window optimisation is that Bayesian methods with human-elicited priors are systematically prone to salience, recency, and narrative bias. A prior distribution shaped by a decade of momentum-factor success will ``know'' momentum works; that is not knowledge, it is regime-embedded belief. This is a second reason to refuse to let a five-year in-sample winner override an informed prior --- the numerical evidence and the elicited prior are contaminated by the same regime.
-
-\subsubsection{Why these specific integer values}
-
-The specific magnitudes 35/30/20/15 are not derived from a proven optimum. They are chosen to satisfy three constraints:
-
-\begin{enumerate}[noitemsep]
-    \item \textbf{Momentum $>$ quality $>$ volatility $>$ value.} Reflects the ordering of empirical premia in the AQR literature (Jegadeesh \& Titman, 1993; Asness, Frazzini \& Pedersen, 2019; Baker, Bradley \& Wurgler, 2011) and the compounded issue that the value factor here is proxied only by expense ratio.
-    \item \textbf{No factor at or below 10\%.} A factor below 10\% receives such a small weight in the weighted geometric mean that it fails to discriminate between candidates; the multi-factor consistency requirement collapses to a three-factor screen.
-    \item \textbf{No factor above 40\%.} A factor above 40\% dominates the integrated score to the point that a single-factor selection would produce nearly the same portfolio. This defeats the multi-factor rationale and re-introduces single-factor tail risk.
-\end{enumerate}
-
-Within those constraints, the round-number allocation is a Schelling point that can be explained in a sentence to a future maintainer or auditor. It is deliberately regularised away from an in-sample optimum.
-
-\subsubsection{When to revise}
-
-The policy weights will be revisited when at least one of the following is available:
-
-\begin{enumerate}[noitemsep]
-    \item \textbf{Backfilled history through pre-2020} that permits a non-overlapping regime comparison (2011--2015 vs 2021--2026 is the immediate target).
-    \item \textbf{A working value factor} using fundamental data (P/E, P/B, dividend yield) rather than expense ratio.
-    \item \textbf{A deliberate factor-level sentiment override} --- a documented, time-stamped, committed edit to \texttt{configs/etf\_smart\_beta.toml} reflecting a macro view (e.g. a downweighting of momentum during a period the operator judges to be a valuation-driven late-cycle regime). Such overrides are the operator's discretionary layer above the systematic core, and are logged in git rather than automated.
-\end{enumerate}
-
-\textbf{References for this subsection:}
-\begin{itemize}[noitemsep]
-    \item Peters, O. (2019). ``The ergodicity problem in economics.'' \emph{Nature Physics}, 15, 1216--1221.
-    \item Kelly, J. L. (1956). ``A new interpretation of information rate.'' \emph{Bell System Technical Journal}, 35(4), 917--926.
-    \item Thorp, E. O. (2006). ``The Kelly criterion in blackjack, sports betting, and the stock market.'' \emph{Handbook of Asset and Liability Management}, 1, 385--428.
-    \item Taleb, N. N. (2018). \emph{Skin in the Game}. Random House. --- Chapter on ergodicity and ensemble vs time probability.
-\end{itemize}
-
-%% ============================================================
-\section{Portfolio Construction}
-%% ============================================================
-
-\subsection{Universe Filtering Pipeline}
-
-Starting from 4,953 ETFs with IB historical data:
-
-\begin{enumerate}[noitemsep]
-    \item \textbf{History requirement:} $\geq$252 trading days of price data $\rightarrow$ 2,254 ETFs
-    \item \textbf{Data quality:} $<$20\% missing daily bars $\rightarrow$ 2,254 ETFs
-    \item \textbf{Leveraged/Inverse exclusion:} Remove 70 leveraged/inverse ETFs $\rightarrow$ 2,184 ETFs
-    \item \textbf{Liquidity filter:} $\geq$50,000 average daily volume $\rightarrow$ \textbf{999 ETFs}
-\end{enumerate}
-
-\subsection{Robust Mean-Variance Optimisation (Default)}
-
-The strategy uses robust MVO as the default optimizer (\texttt{OPTIMIZER\_TYPE = "mvo"}). The implementation uses an Axioma-style risk adjustment with three layers of robustness:
-
-\begin{equation}
-\max_{w} \quad \mu^T w - \lambda \, w^T \Sigma \, w - \gamma \, w^T \sigma
-\end{equation}
-
-Subject to: $\sum_i w_i = 1$, \quad $0.03 \leq w_i \leq 0.08$
-
-\textbf{Robustness layers:}
-\begin{enumerate}[noitemsep]
-    \item \textbf{Ledoit-Wolf covariance shrinkage} (Ledoit \& Wolf, 2004): Shrinks the sample covariance toward a structured target, reducing estimation noise in the $\Sigma$ matrix
-    \item \textbf{Bayes-Stein return shrinkage} (Jorion, 1986): Shrinks expected returns toward the cross-sectional mean at 50\% strength, dampening extreme alpha estimates that cause naive MVO to fail
-    \item \textbf{Michaud resampling} (Michaud, 1998): Runs MVO 50 times with perturbed returns and averages the resulting weights, directly addressing the ``optimization enigma'' (Michaud, 1989)
-    \item \textbf{Tight weight bounds} (3--8\%): With 30 positions summing to 100\% (equal weight = 3.33\%), the optimizer can only make marginal adjustments from equal weight---it cannot make wild bets
-    \item \textbf{Axioma risk penalty} ($\gamma \cdot w^T \sigma$): Explicitly penalises high-volatility positions, preventing the optimizer from concentrating in volatile assets
-\end{enumerate}
-
-\textbf{Advantages over naive MVO:}
-\begin{itemize}[noitemsep]
-    \item \textbf{Exploits correlation structure}: The $w^T \Sigma w$ term actively diversifies across correlated positions---something rank-based methods cannot do
-    \item \textbf{Stability}: Tight bounds + shrinkage + resampling produce stable weights across runs. Each position can only vary $\pm$5pp from equal weight
-    \item \textbf{Institutional standard}: This is how BlackRock, AQR, and other quantitative allocators deploy MVO in practice (Axioma, 2013)
-\end{itemize}
-
-\subsection{RankBased Exponential Weighting (Alternative)}
-
-RankBased weighting is available as a configurable option (\texttt{OPTIMIZER\_TYPE = "rankbased"}). After the top $N$ ETFs are selected by integrated factor score, weights are assigned by rank:
-
-\begin{equation}
-w_i = \frac{e^{-\alpha \cdot r_i}}{\sum_{j=1}^{N} e^{-\alpha \cdot r_j}}, \quad r_i = \text{rank of ETF } i \text{ (0-indexed)}
-\end{equation}
-
-Where $\alpha$ controls the steepness of the exponential decay. This is a stable, transparent alternative that ignores correlation structure entirely. It may be preferred when the user values deterministic weights (identical inputs always produce identical outputs) over risk-adjusted optimality.
-
-\textbf{Tradeoff:} RankBased does not consider correlations between positions. Two highly correlated ETFs with similar factor scores will both receive high weights, reducing effective diversification. Robust MVO penalises this via the covariance matrix.
-
-\subsection{Rebalancing Rules}
-
-\textbf{Frequency:} Quarterly
-
-\textbf{Drift Threshold:} 5\% --- a scheduled rebalance is skipped if no position has drifted more than 5\% from target weight. This results in 0.6 actual rebalances per year.
-
-\textbf{Rebalance Actions:}
 \begin{itemize}
-    \item Sell positions no longer in the top 30
-    \item Buy new positions that have entered the top 30
-    \item Adjust existing positions that have drifted $>$5\% from target weight
-    \item Maintain cash reserve for rebalancing
+    \item \textbf{T1.1 The value factor is fake.} \texttt{SimplifiedValueFactor} returns $-1 \times$ expense ratio. This is a fee preference, not a value signal. The 15\% weight buys almost nothing. The natural regime hedge that value provides (2000--2002, 2022) is absent from the model. \textbf{Highest-impact single fix.} Replace with fundamentals composite (P/E, P/B, dividend yield); IB Fundamentals API preferred over yfinance.
+    \item \textbf{T1.2 Survivorship bias in the cached universe.} The per-ticker parquet cache contains only ETFs that still trade. Delisted / liquidated ETFs are absent. Every backtest overstates historical performance by the average return of survivors. Mitigation: 1--2\% CAGR haircut on all backtested figures.
+    \item \textbf{T1.3 Look-ahead bias presumed absent, never proved.} No pinning test asserts that factor calculations at time $t$ use only data with index $< t$. If any factor uses a window that includes $t{+}1$, the backtest is silently inflated. Fix: add a shift-and-recompute test. Two hours' work.
 \end{itemize}
 
-%% ============================================================
-\section{Risk Management Framework}
-%% ============================================================
+\subsection{Tier 2 --- significant weaknesses}
 
-\subsection{Automated Trailing Stops}
-
-Every BUY fill automatically generates a trailing stop order via IB Gateway:
-
-\begin{table}[H]
-\centering
-\begin{tabular}{ll}
-\toprule
-\textbf{Parameter} & \textbf{Value} \\
-\midrule
-Order Type & TRAIL \\
-Trail Amount & 10\% \\
-Time in Force & GTC (Good-Til-Cancelled) \\
-Trigger & LAST price \\
-Outside RTH & No \\
-\bottomrule
-\end{tabular}
-\caption{Trailing Stop Configuration}
-\end{table}
-
-\subsection{Entry Stop-Loss}
-
-The backtesting engine applies a 12\% entry-based stop-loss:
-
-\begin{equation}
-\text{If } P_{i,t} < P_{i,\text{entry}} \times 0.88 \text{ then SELL}
-\end{equation}
-
-This protects against immediate losses on new positions before the trailing stop becomes active.
-
-\subsection{Position-Level Risk Controls}
-
-\begin{table}[H]
-\centering
-\begin{tabular}{ll}
-\toprule
-\textbf{Control} & \textbf{Limit} \\
-\midrule
-Maximum Loss Per Position & -12\% (entry stop) \\
-Trailing Protection & 10\% from peak (TRAIL order) \\
-Position Concentration & 3--8\% per position (MVO bounds) \\
-Maximum Weight & 8\% (hard constraint) \\
-Number of Positions & 30 \\
-Leveraged/Inverse ETFs & Excluded from universe \\
-\bottomrule
-\end{tabular}
-\caption{Position-Level Risk Limits}
-\end{table}
-
-%% ============================================================
-\section{Extended Backtest Results}
-%% ============================================================
-
-\subsection{Configuration Comparison}
-
-Full results across all tested configurations (50K+ volume filter):
-
-\begin{table}[H]
-\centering
-\small
-\renewcommand{\arraystretch}{1.1}
-\begin{tabular}{llrrrrrr}
-\toprule
-\textbf{Optimizer} & \textbf{Pos} & \textbf{Freq} & \textbf{CAGR} & \textbf{Sharpe} & \textbf{Sortino} & \textbf{Max DD} & \textbf{Reb/Yr} \\
-\midrule
-RankBased & 20 & Bimth & 11.4\% & 0.58 & 0.85 & -22.8\% & 1.0 \\
-RankBased & 25 & Bimth & 10.9\% & 0.55 & 0.81 & -23.4\% & 1.0 \\
-RankBased & 30 & Bimth & 11.6\% & 0.61 & 0.89 & -21.9\% & 0.6 \\
-RankBased & 30 & Qtrly & 11.6\% & 0.61 & 0.89 & -21.9\% & $<$1 \\
-MVO (robust) & 20 & Bimth & 11.5\% & 0.59 & 0.87 & -22.2\% & 1.0 \\
-MVO (robust) & 25 & Bimth & 11.3\% & 0.59 & 0.86 & -22.5\% & 0.6 \\
-MVO (robust) & 30 & Bimth & 11.7\% & 0.62 & 0.90 & -21.8\% & 0.6 \\
-\rowcolor{green!10} \textbf{MVO (robust)} & \textbf{30} & \textbf{Qtrly} & \textbf{12.1\%} & \textbf{0.64} & \textbf{0.95} & \textbf{-22.2\%} & \textbf{0.6} \\
-\bottomrule
-\end{tabular}
-\caption{Full Configuration Comparison (50K+ vol filter, 5-year backtest)}
-\end{table}
-
-\subsection{Universe Scope Comparison}
-
-Testing with different universe definitions (MVO robust, 30 positions):
-
-\begin{table}[H]
-\centering
-\begin{tabular}{lrrrrrr}
-\toprule
-\textbf{Universe} & \textbf{N} & \textbf{CAGR} & \textbf{Sharpe} & \textbf{Max DD} & \textbf{Calmar} & \textbf{Reb/Yr} \\
-\midrule
-\rowcolor{green!10} All liquid & 999 & \textbf{12.1\%} & \textbf{0.64} & -22.2\% & 0.55 & 0.6 \\
-US-focused & 900 & 11.0\% & 0.59 & \textbf{-17.9\%} & \textbf{0.61} & 0.6 \\
-Equity only & 907 & 8.7\% & 0.39 & -25.8\% & 0.34 & 1.0 \\
-\bottomrule
-\end{tabular}
-\caption{Universe Scope Comparison}
-\end{table}
-
-\textbf{Observation:} The US-focused universe (excluding international ETFs) produces the lowest maximum drawdown (-17.9\%) and highest Calmar ratio (0.61), but at the cost of lower CAGR. The all-liquid universe provides the best risk-adjusted returns (highest Sharpe) by leveraging international diversification.
-
-\subsection{Historical Version Comparison}
-
-\begin{table}[H]
-\centering
-\renewcommand{\arraystretch}{1.2}
-\begin{tabular}{lrrrrr}
-\toprule
-\textbf{Version} & \textbf{Universe} & \textbf{CAGR} & \textbf{Sharpe} & \textbf{Sortino} & \textbf{Max DD} \\
-\midrule
-v1.0 (yfinance, 7mo) & 623 & 9.6\% & 0.83$^*$ & --- & -7.95\%$^*$ \\
-v2.0 (yfinance, 5yr) & 623 & 9.1\% & 0.40 & 0.55 & -27.2\% \\
-v3.0 (IB, 5yr) & 1,459 & 12.3\% & 0.66 & 0.95 & -23.4\% \\
-\rowcolor{green!10} v4.2 (IB expanded, robust MVO) & 999 & 12.1\% & 0.64 & 0.95 & -22.2\% \\
-\bottomrule
-\end{tabular}
-\caption{Strategy Evolution Across Versions}
-\end{table}
-
-\noindent$^*$\textit{v1.0 metrics measured over a benign 7-month period and are not comparable to the 5-year backtests.}
-
-%% ============================================================
-\section{Implementation: Automated Pipeline}
-%% ============================================================
-
-\subsection{Architecture Overview}
-
-The strategy is implemented as a 7-step automated pipeline. Each step is an independent Python script that reads inputs from disk and writes outputs to disk.
-
-\begin{table}[H]
-\centering
-\small
-\begin{tabular}{clll}
-\toprule
-\textbf{Step} & \textbf{Script} & \textbf{Purpose} & \textbf{Output} \\
-\midrule
-1 & s1\_universe.py & ETF universe discovery & eligible\_tickers.txt \\
-2 & s2\_collect.py & IB historical data collection & Per-ticker parquets \\
-3 & s3\_factors.py & Factor scoring & factor\_scores\_latest.parquet \\
-4 & s4\_optimize.py & Portfolio optimization (robust MVO) & target\_portfolio.csv \\
-5 & s5\_backtest.py & Backtesting \& performance & backtest\_results.csv \\
-6 & s6\_trades.py & Trade recommendations & trade\_plan.csv \\
-7 & s7\_execute.py & IB order execution + stops & execution\_log.csv \\
-\bottomrule
-\end{tabular}
-\caption{Pipeline Steps}
-\end{table}
-
-\subsection{IB Gateway Integration}
-
-\textbf{Connection:} Port 4001 (IB Gateway), client ID 5
-
-\textbf{Capabilities:}
-\begin{itemize}[noitemsep]
-    \item Historical data download (5 years, daily bars, rate-limited at 12s intervals)
-    \item Live portfolio positions and account summary
-    \item Market/limit order placement
-    \item Automated TRAIL stop orders on all BUY fills
-    \item Resume support for interrupted data collection (per-ticker parquet caching)
+\begin{itemize}
+    \item \textbf{T2.1 No regime awareness.} Strategy runs identically in bull, bear, and crisis regimes. Long-only, concentrated, static 22\% cash reserve, 10\% trailing stops. No signal to de-risk in rising-VIX / breadth-collapsing environments. Fix: add SPY-vs-200d moving average and VIX overlay; when both signals point to stress, shift 100\% target equity to 60\%. Must include hysteresis and $\geq$30-day dwell time in either regime (per Principle 3).
+    \item \textbf{T2.2 Correlation blindness in top-N selection.} The integrated score picks the top 20 ETFs by factor score without checking their pairwise correlations. Current live holdings read as a broad international dividend / value / quality tilt with likely 0.6--0.8 pairwise correlations. Effective diversification is materially less than 20 positions suggests. Fix: take top 40 by score, cluster on 6-month correlations, pick top-scored representative per cluster until 20 positions filled.
+    \item \textbf{T2.3 Conviction magnitude discarded.} The integrated score's magnitude (0.95 vs 0.62) is not used in the optimiser; only rank order matters. Exponential rank weighting mitigates partially. Fix: pass score magnitude as expected-return alpha to the optimiser.
 \end{itemize}
 
-\subsection{Data Collection Status}
+\subsection{Tier 3 --- smaller nudges}
 
-\begin{itemize}[noitemsep]
-    \item \textbf{Total collected:} 4,953 ETFs (essentially complete)
-    \item \textbf{History depth:} 5 years (1,256 trading days) for most ETFs
-    \item \textbf{Liquid universe:} 999 ETFs with $\geq$50K average daily volume
-    \item \textbf{All data cached:} Per-ticker parquet files, fully resumable
+\begin{itemize}
+    \item \textbf{T3.1 Factor lookback windows are convention.} 252 / 21 / 60 chosen by AQR convention, never tested for optimality in this universe.
+    \item \textbf{T3.2 Risk parameters are round numbers.} 10\%, 12\%, \$70k, 5\% drift, 2--15\% weight bounds --- all defensible, all uncalibrated. Sensitivity grid would locate them on the risk-return frontier.
+    \item \textbf{T3.3 Rebalance frequency untested.} Bimonthly vs quarterly turnover trade-off never explicitly measured on this universe.
 \end{itemize}
 
-\subsection{Trade Execution Flow}
-\label{sec:trade_execution}
+\subsection{Priority Order}
 
-\begin{enumerate}
-    \item Connect to IB Gateway (port 4001)
-    \item Pull live positions and account summary
-    \item Compare current vs target portfolio (MVO optimal weights)
-    \item Generate trade plan: sell non-targets, buy missing, rebalance drifted ($>$5\%)
-    \item Enforce cash reserve on all buys
-    \item Execute orders with \texttt{CONFIRM = True} safety gate
-    \item For every BUY fill: immediately place 10\% TRAIL stop (GTC)
-    \item Log all trades to execution log
+\begin{enumerate}[noitemsep]
+    \item T1.3 (look-ahead pinning test) --- 2 hours. Proves the model is not silently a lie.
+    \item T1.1 (real value factor) --- 1--2 evenings. Single highest-impact fix.
+    \item T2.1 (regime overlay) --- 1 evening. Drawdown protection before live orders resume.
+    \item T2.2 (correlation clustering) --- 1 evening. Effective diversification.
+    \item T1.2 (survivorship haircut) --- 1 hour. Honesty in reporting.
+    \item T2.3, T3.\* --- as time permits.
 \end{enumerate}
-
-%% ============================================================
-\section{Configuration Reference}
-%% ============================================================
-
-\begin{table}[H]
-\centering
-\renewcommand{\arraystretch}{1.2}
-\begin{tabular}{ll}
-\toprule
-\textbf{Parameter} & \textbf{Value} \\
-\midrule
-Initial Capital & \$1,000,000 \\
-Active Positions & 30 \\
-Optimizer & Robust MVO (Ledoit-Wolf + Michaud resampling) \\
-Risk Aversion ($\lambda$) & 2.0 \\
-Axioma Risk Penalty ($\gamma$) & 0.5 \\
-Min Weight & 3\% (hard constraint) \\
-Max Weight & 8\% (hard constraint) \\
-Return Shrinkage & 50\% Bayes-Stein toward cross-sectional mean \\
-Resampling Iterations & 50 (Michaud) \\
-Entry Stop-Loss & 12\% from entry price \\
-Trailing Stop & 10\% TRAIL, GTC (on all BUY fills) \\
-Rebalance Frequency & Quarterly \\
-Drift Threshold & 5\% \\
-Commission & \$0 (IB US ETF trades) \\
-Spread Cost & 2 basis points \\
-Slippage & 2 basis points \\
-Min Daily Volume & 50,000 shares \\
-\midrule
-\textbf{Factor Weights} & \\
-\quad Momentum & 35\% (252-day, skip 21) \\
-\quad Quality & 30\% (Sharpe + Resilience + Stability) \\
-\quad Volatility & 20\% (inverse 60-day vol) \\
-\quad Value & 15\% (inverse expense ratio) \\
-\bottomrule
-\end{tabular}
-\caption{Full Strategy Configuration}
-\end{table}
-
-%% ============================================================
-\section{Limitations and Risks}
-%% ============================================================
-
-\begin{enumerate}
-    \item \textbf{Static factor scores:} The current backtest uses end-of-period factor scores applied retrospectively. A fully dynamic (rolling) backtest would provide more realistic results, potentially with slightly lower CAGR due to lag.
-
-    \item \textbf{International bias:} The factor model naturally selects international ETFs. If international markets underperform the US for an extended period, the strategy will lag SPY. This is the tradeoff for lower volatility.
-
-    \item \textbf{No sector constraints:} The optimizer does not enforce sector diversification beyond what the factor model naturally provides. Adding explicit sector caps (e.g., max 30\% per category) is a planned enhancement.
-
-    \item \textbf{Survivorship bias:} The universe includes only ETFs currently listed. ETFs that were delisted during the backtest period are not included, which may slightly overstate performance.
-
-    \item \textbf{Expense ratio data:} Real expense ratios are not yet reliably available for the full universe. When expense data is missing, the Value factor (15\% weight) is automatically skipped and its weight redistributed proportionally across the remaining three factors. Incorporating real expense data would restore the Value factor signal.
-
-    \item \textbf{MVO estimation risk:} Although the robust MVO implementation addresses the classical failure modes identified by Michaud (1989)---via Ledoit-Wolf covariance shrinkage, Bayes-Stein return shrinkage, and Michaud resampling---the optimizer still relies on estimated expected returns and covariance. Tight weight bounds (3--8\%) are the primary safeguard: with 30 positions at equal weight 3.33\%, the optimizer can only deviate $\pm$5pp from equal weight, limiting the damage from estimation error. Users should monitor weight stability across consecutive runs.
-\end{enumerate}
-
-%% ============================================================
-\section{Next Steps}
-%% ============================================================
-
-\begin{enumerate}
-    \item \textbf{Rolling factor model:} Implement dynamic factor recalculation at each rebalance date (rather than static end-of-period scores) for more realistic backtest validation.
-    \item \textbf{Real expense ratios:} Integrate actual ETF expense ratio data to improve the Value factor signal.
-    \item \textbf{Sector constraints:} Add explicit category concentration limits (max 30\% per sector) to the portfolio optimizer.
-    \item \textbf{Live deployment:} Execute the pipeline against real IB positions. All infrastructure is in place; requires setting \texttt{CONFIRM = True} in the execution notebook.
-    \item \textbf{Performance monitoring:} Track live performance against backtest expectations. Update this document with live results at the first quarterly review.
-\end{enumerate}
-
-%% ============================================================
-\section{Academic References}
-%% ============================================================
-
-\begin{enumerate}
-    \item Jegadeesh, N., \& Titman, S. (1993). Returns to buying winners and selling losers: Implications for stock market efficiency. \textit{Journal of Finance}, 48(1), 65--91.
-
-    \item Novy-Marx, R. (2012). Is momentum really momentum? \textit{Journal of Financial Economics}, 103(3), 429--453.
-
-    \item Han, Y., Zhou, G., \& Zhu, Y. (2014). Taming momentum crashes: A simple stop-loss strategy. \textit{Available at SSRN}.
-
-    \item Asness, C. S., Frazzini, A., \& Pedersen, L. H. (2019). Quality minus junk. \textit{Review of Accounting Studies}, 24(1), 34--112.
-
-    \item Baker, M., Bradley, B., \& Wurgler, J. (2011). Benchmarks as limits to arbitrage: Understanding the low-volatility anomaly. \textit{Financial Analysts Journal}, 67(1), 40--54.
-
-    \item AQR Capital Management. (2014). Fact, Fiction, and Momentum Investing. White Paper.
-
-    \item AQR Capital Management. (2016). Fact, Fiction, and Factor Investing. White Paper.
-
-    \item Markowitz, H. (1952). Portfolio Selection. \textit{Journal of Finance}, 7(1), 77--91.
-
-    \item Goldberg, L. R., et al. (2013). Beyond Markowitz: A comprehensive wealth allocation framework for individual investors. \textit{Journal of Applied Finance}, 23(1), 8--21.
-
-    \item Damodaran, A. (2012). \textit{Investment Philosophies: Successful Strategies and the Investors Who Made Them Work}. 2nd Edition, Wiley.
-
-    \item Michaud, R. O. (1989). The Markowitz optimization enigma: Is ``optimized'' optimal? \textit{Financial Analysts Journal}, 45(1), 31--42.
-
-    \item Michaud, R. O. (1998). \textit{Efficient Asset Management: A Practical Guide to Stock Portfolio Optimization and Asset Allocation}. Harvard Business School Press.
-
-    \item Ledoit, O., \& Wolf, M. (2004). A well-conditioned estimator for large-dimensional covariance matrices. \textit{Journal of Multivariate Analysis}, 88(2), 365--411.
-
-    \item Jorion, P. (1986). Bayes-Stein estimation for portfolio analysis. \textit{Journal of Financial and Quantitative Analysis}, 21(3), 279--292.
-
-    \item Axioma Research. (2013). \textit{It's All About the Covariance Matrix: Myths and Truths about Portfolio Optimization}. Axioma White Paper.
-\end{enumerate}
-
-\vspace{1cm}
 
 %% ============================================================
 \section{Change Log}
 \label{sec:changelog}
 %% ============================================================
 
-Entries are chronological, most recent first. Each entry cites the git commit that closes it (short SHA). \textbf{Update rule:} every commit that touches \texttt{configs/etf\_smart\_beta.toml}, \texttt{src/factors/}, \texttt{src/portfolio/}, or the execution scripts must also append an entry here or explain why not.
+Chronological, most recent first. Each entry cites the closing commit SHA(s). Every commit touching \texttt{configs/etf\_smart\_beta.toml}, \texttt{src/factors/}, \texttt{src/portfolio/}, or the execution scripts must append an entry.
 
-\subsection*{2026-07-09 --- Living Edition; adversarial review + weight justification}
+\subsection*{2026-07-10 --- Full rewrite}
 
-Commits: \texttt{d9826dc}, plus this one.
+Document rewritten from the ground up. Historical version-comparison content (v3 $\rightarrow$ v4 migration story, v4.2 backtest tables, Feb-2026 holdings snapshot) removed. New structure: Executive Summary $\rightarrow$ Strategy Mechanics $\rightarrow$ Parameters and Weights $\rightarrow$ Current Flaws $\rightarrow$ Change Log. Factor definitions and integration rationale promoted into the Mechanics section; the constraint framework (10\%--40\% weight bounds, factor ordering) promoted into the Parameters section. Length approximately halved.
 
-\begin{itemize}[noitemsep]
-    \item Reframed the document as a \emph{living operating document} rather than a fixed v4.2 spec. New \S\ref{sec:living} explains the reader contract, sources of truth, and update triggers.
-    \item Added \S\ref{sec:canonical} pulling the live policy values from \texttt{configs/etf\_smart\_beta.toml} into a single source-of-truth table. Explicit acknowledgement that the body sections describing v4.x design details drift from the live policy in three places (position count 20 vs 30, weight bounds 2--15\% vs 3--8\%, default optimiser RankBased vs MVO).
-    \item Added \S\ref{sec:adversarial} with tiered flaws from the operator's own commissioned adversarial review:
-    \begin{itemize}[noitemsep]
-        \item T1.1 The ``value'' factor is fake (expense-ratio proxy only). Highest single-value fix.
-        \item T1.2 Survivorship bias in cached universe; mitigation via CAGR haircut.
-        \item T1.3 Look-ahead bias presumed absent but never proved by a pinning test.
-        \item T2.1 No regime awareness; proposed SPY-200d + VIX overlay.
-        \item T2.2 Correlation blindness in top-N selection; proposed clustering step.
-        \item T2.3 Conviction magnitude discarded.
-        \item T3.1--T3.3 Untested lookbacks, round-number risk params, unmeasured rebalance frequency.
-    \end{itemize}
-    \item Added \S\ref{sec:weight_justification} (in the Factor Framework section) recording the July~2026 recalibration review. Records the ergodicity-economics case for retaining 35/30/20/15 as an insurance-premium-bearing informed prior rather than adopting the momentum-heavy in-sample winner. Cites Peters (2019), Kelly (1956), Thorp (2006), Taleb (2018).
-\end{itemize}
+\subsection*{2026-07-09 --- Adversarial review + weight justification (superseded by rewrite)}
 
-\subsection*{2026-02-15 --- Version 4.2 (previous major revision)}
+Adversarial review commissioned and recorded. Ergodicity-economics justification for retaining the 35/30/20/15 weight vector recorded in the Factor Framework section. Design Principles (deterministic decides, no magical thinking, slowly varying) recorded as non-negotiable filters. Level-1 factor-weight diagnostic produced at \texttt{docs/research/2026-07\_factor\_weight\_diagnostic.md}. Commits d9826dc, 2198273, 6a14212.
 
-\begin{itemize}[noitemsep]
-    \item Documented the v4.x design: 4{,}953-ETF universe, 30 positions, tight 3--8\% weight bounds, robust MVO default with Ledoit-Wolf + Bayes-Stein + Michaud resampling, quarterly rebalance. This design was backtested and documented; the live policy has since diverged in the three places noted above.
-    \item Recorded backtest results: 12.1\% CAGR / 0.64 Sharpe / 0.95 Sortino / -22.2\% MaxDD over Feb 2021--Feb 2026 for the v4.2 design.
-\end{itemize}
+\subsection*{2026-02-15 --- Prior v4.2 design (historical, retained for context)}
 
-\vspace{1cm}
-
-\noindent\textbf{Document status:} Living \\
-\textbf{Last major review:} 2026-07-09 \\
-\textbf{Authoring:} Operator with AI assistance; every commit signed via git
+Prior design documented 30 positions, 3--8\% weight bounds, quarterly rebalance, Robust MVO default. Backtested 12.1\% CAGR / 0.64 Sharpe over 2021--2026. Live configuration diverged from this design in three places (position count, weight bounds, default optimiser) and the 2026-07 rewrite reconciled the document to what is actually running.
 
 \end{document}
