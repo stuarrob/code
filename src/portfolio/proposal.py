@@ -139,6 +139,7 @@ def propose_trades(
     factor_scores: Optional[pd.DataFrame] = None,
     cost_model: Optional[TransactionCostModel] = None,
     min_trade_notional: float = DEFAULT_MIN_TRADE_NOTIONAL,
+    prices: Optional[pd.DataFrame] = None,
 ) -> TradeProposal:
     """Compute the trade blotter that gets from `snapshot` to `target_weights`.
 
@@ -159,6 +160,12 @@ def propose_trades(
         min_trade_notional: drop any proposed trade below this dollar
             value. Prevents micro-orders that lose money to commission
             drag or minimum-lot issues.
+        prices: optional wide DataFrame (dates × tickers) providing a
+            fallback market price for tickers NOT held in the snapshot.
+            The snapshot only carries prices for currently-held names;
+            without this fallback, fresh BUYs get skipped with a
+            "no market price" warning. When provided, uses the LAST
+            available close per ticker.
 
     Returns:
         TradeProposal.
@@ -186,6 +193,18 @@ def propose_trades(
     current = _current_dollar_map(snapshot)  # ticker -> (shares, price, mkt_value)
     warnings: list[str] = []
     trades: list[Trade] = []
+
+    # Build a fallback price lookup for tickers NOT currently held. The
+    # snapshot only carries prices for held names; without this fallback
+    # a rebalance that proposes 25 fresh BUYs on the top-30 would emit
+    # 25 "no market price" warnings and no BUY trades.
+    fallback_price: dict[str, float] = {}
+    if prices is not None and not prices.empty:
+        last_row = prices.ffill().iloc[-1]
+        fallback_price = {
+            t: float(p) for t, p in last_row.items()
+            if pd.notna(p) and p > 0
+        }
 
     # Full universe of tickers to consider: union of current holdings and
     # target weights. Anything with target > 0 might be BUY/EXTEND;
@@ -223,10 +242,18 @@ def propose_trades(
             continue
 
         # Market price is required. If we don't have one from the snapshot,
-        # we cannot size a trade. Skip and warn.
+        # fall back to the last close in the price cache (if provided).
+        # If still no price, skip and warn — this is the final barrier.
         if market_price <= 0 and target_pct > 0:
-            warnings.append(f"{ticker}: no market price in snapshot — skipped BUY")
-            continue
+            fallback = fallback_price.get(ticker, 0.0)
+            if fallback > 0:
+                market_price = fallback
+            else:
+                warnings.append(
+                    f"{ticker}: no market price in snapshot or price cache — "
+                    f"skipped BUY"
+                )
+                continue
 
         # Direction + share count.
         if target_pct == 0.0:

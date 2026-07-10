@@ -672,12 +672,14 @@ with tab_propose:
                 with st.spinner("Comparing target to live positions…"):
                     try:
                         factor_scores = scoring.factor_scores if scoring is not None else None
+                        load = st.session_state.get("price_load")
                         proposal = propose_trades(
                             snapshot=snap,
                             target_weights=weights,
                             cash_budget=cash_budget,
                             policy=policy,
                             factor_scores=factor_scores,
+                            prices=load.prices if load is not None else None,
                         )
                         st.session_state["proposed_trades"] = proposal
                         st.session_state["explanation"] = None
