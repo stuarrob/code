@@ -227,11 +227,21 @@ def propose_trades(
         delta_value = target_value - current_value
 
         # Decide action + skip if inside drift threshold.
+        # ASYMMETRIC drift (2026-07-10 fix following live over-invest incident):
+        #   - Under-weight retained within drift → SKIP (whipsaw guard)
+        #   - Over-weight retained within drift → PROCEED (cash discipline)
+        #   - Retained beyond drift (either side) → PROCEED
+        #   - Dropped from target (target_pct == 0) → ALWAYS PROCEED (full exit)
+        # This closes the loophole where appreciated retained positions
+        # accumulated overhang and pushed the total invested past the
+        # available cash budget.
         if abs(delta_value) < 1e-6:
             continue
-        if abs(target_pct - current_pct) < drift and current_shares > 0:
-            # Existing position within drift — skip rebalance.
-            continue
+        if current_shares > 0 and target_pct > 0.0:
+            gap_pct = target_pct - current_pct  # positive = under-weight
+            if 0 <= gap_pct < drift:
+                # Under-weight retained, within drift — skip (whipsaw guard).
+                continue
 
         # Below-min notional filter (drop micro-trades regardless of side).
         if abs(delta_value) < min_trade_notional and current_shares > 0:
@@ -307,6 +317,67 @@ def propose_trades(
             target_weight_pct=float(target_pct),
             weight_gap_pct=float(target_pct - current_pct),
         ))
+
+    # ────────────────────────────────────────────────────────────
+    # CASH-NEUTRALITY INVARIANT (2026-07-10 fix)
+    # ────────────────────────────────────────────────────────────
+    # After Change 2 (asymmetric drift) the raw trade list may still
+    # over-invest if the operator has a large ratio of new BUYs to
+    # SELLs (e.g. a full universe rotation). Enforce a hard cap:
+    #     buys - sells  <=  available_cash
+    # When violated, scale every BUY / EXTEND down proportionally.
+    # SELLs are never touched (do not force churn).
+    available_cash = (
+        float(snapshot.cash) + float(cash_budget) - float(policy.cash_reserve)
+    )
+    buys_notional = sum(t.delta_notional for t in trades if t.delta_shares > 0)
+    sells_notional = sum(t.delta_notional for t in trades if t.delta_shares < 0)
+    net_cash_out = buys_notional - sells_notional
+
+    if net_cash_out > available_cash + 1e-6 and buys_notional > 0:
+        max_allowed_buys = max(available_cash + sells_notional, 0.0)
+        scale = max_allowed_buys / buys_notional
+        rebuilt: list[Trade] = []
+        for t in trades:
+            if t.delta_shares <= 0:
+                rebuilt.append(t)
+                continue
+            new_shares = int(t.delta_shares * scale)
+            if new_shares == 0:
+                # Scaled below one share — drop this BUY entirely and note.
+                warnings.append(
+                    f"{t.ticker}: BUY scaled to 0 shares by cash cap — dropped"
+                )
+                continue
+            new_notional = new_shares * t.market_price
+            if new_notional < min_trade_notional:
+                warnings.append(
+                    f"{t.ticker}: BUY scaled below min notional "
+                    f"{min_trade_notional:.0f} — dropped"
+                )
+                continue
+            new_cost = cost_model.calculate_trade_cost(new_notional, is_buy=True)
+            new_target_shares = int(t.current_shares) + new_shares
+            rebuilt.append(Trade(
+                ticker=t.ticker, action=t.action,
+                current_shares=int(t.current_shares),
+                target_shares=new_target_shares,
+                delta_shares=new_shares,
+                market_price=t.market_price,
+                delta_notional=float(new_notional),
+                est_cost=float(new_cost),
+                current_weight_pct=t.current_weight_pct,
+                target_weight_pct=t.target_weight_pct,
+                weight_gap_pct=t.weight_gap_pct,
+            ))
+        trades = rebuilt
+        warnings.append(
+            f"Proposal cash-constrained — BUY notionals scaled to "
+            f"{scale:.1%} of intended (available cash "
+            f"${available_cash:,.0f}, raw BUYs ${buys_notional:,.0f}, "
+            f"SELLs ${sells_notional:,.0f}). Reduces exposure but "
+            f"preserves relative BUY weights."
+        )
 
     # Aggregate metrics.
     turnover_notional = sum(t.delta_notional for t in trades)
