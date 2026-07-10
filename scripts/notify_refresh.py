@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Post-run notification for the weekly ETF cache refresh — email + WhatsApp.
+"""Post-run notification for the weekly ETF cache refresh — email + Telegram.
 
 Called from ``daily_etf_data_windows.cmd`` after ``daily_etf_data.py``
 finishes (or fails). Reads the tail of ``daily_etf.log``, summarises the
@@ -8,9 +8,8 @@ date), and delivers it via:
 
   1. **SMTP email** using ``SMTP_HOST``/``SMTP_USER``/``SMTP_PASSWORD``/
      ``ALERT_EMAIL_TO`` from ``.env``. Fires only if all are populated.
-  2. **WhatsApp via CallMeBot** using ``WHATSAPP_PHONE`` (with country code,
-     e.g. ``+9665...``) and ``WHATSAPP_APIKEY`` from ``.env``. Fires only if
-     both are populated.
+  2. **Telegram Bot** using ``TELEGRAM_TOKEN`` and ``TELEGRAM_CHAT_ID`` from
+     ``.env``. Fires only if both are populated.
 
 Both channels are attempted; one silently succeeding is enough. Neither
 channel failing causes the wrapper's exit code to change — that would
@@ -25,11 +24,11 @@ not authenticate.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import smtplib
 import sys
-import urllib.parse
 import urllib.request
 from datetime import datetime
 from email.mime.text import MIMEText
@@ -203,48 +202,50 @@ def _send_email(subject: str, body: str) -> bool:
     return True
 
 
-def _send_whatsapp(body: str) -> bool:
-    """Send a WhatsApp message via the CallMeBot personal-use API.
+def _send_telegram(body: str) -> bool:
+    """Send a message via the Telegram Bot API.
 
-    CallMeBot's `/whatsapp.php` endpoint takes ``phone`` (with country code,
-    no plus), ``text`` (URL-encoded, up to ~1000 chars), and ``apikey``.
-    See https://www.callmebot.com/blog/free-api-whatsapp-messages/ for the
-    signup flow (message their bot from your phone; they reply with a key).
+    Uses ``sendMessage`` with a POST body carrying ``chat_id`` and ``text``.
+    Bot token from ``TELEGRAM_TOKEN``, chat ID from ``TELEGRAM_CHAT_ID``.
+    Bot signup is a two-step BotFather flow — see .env.example.
+
+    Telegram's message length limit is 4096 characters; we truncate
+    defensively at 4000 to leave room for a truncation marker.
     """
-    phone = os.environ.get("WHATSAPP_PHONE")
-    api_key = os.environ.get("WHATSAPP_APIKEY")
-    if not phone or not api_key:
-        missing = [k for k in ("WHATSAPP_PHONE", "WHATSAPP_APIKEY")
+    token = os.environ.get("TELEGRAM_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        missing = [k for k in ("TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID")
                    if not os.environ.get(k)]
-        print(f"notify_refresh: whatsapp skipped, missing: {', '.join(missing)}",
+        print(f"notify_refresh: telegram skipped, missing: {', '.join(missing)}",
               file=sys.stderr)
         return False
 
-    # CallMeBot expects the phone with country code but no plus sign.
-    phone_normalized = phone.lstrip("+").replace(" ", "")
+    if len(body) > 4000:
+        body = body[:3997] + "..."
 
-    # CallMeBot has an ~1000-char limit; truncate defensively.
-    if len(body) > 900:
-        body = body[:897] + "..."
-
-    params = urllib.parse.urlencode({
-        "phone": phone_normalized,
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = json.dumps({
+        "chat_id": chat_id,
         "text": body,
-        "apikey": api_key,
-    })
-    url = f"https://api.callmebot.com/whatsapp.php?{params}"
-
+        "disable_web_page_preview": True,
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
     try:
-        with urllib.request.urlopen(url, timeout=15) as resp:
-            response = resp.read().decode("utf-8", errors="replace")
+        with urllib.request.urlopen(request, timeout=15) as resp:
+            response = json.loads(resp.read().decode("utf-8", errors="replace"))
     except Exception as exc:  # noqa: BLE001
-        print(f"notify_refresh: whatsapp send failed: {exc}", file=sys.stderr)
+        print(f"notify_refresh: telegram send failed: {exc}", file=sys.stderr)
         return False
 
-    # CallMeBot returns "Message queued" or similar on success; explicit error text on failure.
-    if "queued" in response.lower() or "sent" in response.lower():
+    if response.get("ok"):
         return True
-    print(f"notify_refresh: whatsapp response was: {response[:200]}", file=sys.stderr)
+    print(f"notify_refresh: telegram error: {response}", file=sys.stderr)
     return False
 
 
@@ -258,13 +259,13 @@ def main() -> int:
     latest_bar = _latest_cached_bar()
     subject, body = _compose(args.status, summary, latest_bar)
 
-    # WhatsApp body is the subject + body concatenated so the phone-length
-    # limit doesn't hide the headline.
-    whatsapp_body = f"{subject}\n\n{body}"
+    # Telegram body concatenates subject + body so the headline is visible
+    # even if the reader only sees the notification snippet.
+    telegram_body = f"{subject}\n\n{body}"
 
     email_ok = _send_email(subject, body)
-    whatsapp_ok = _send_whatsapp(whatsapp_body)
-    print(f"notify_refresh: subject='{subject}' email={email_ok} whatsapp={whatsapp_ok}")
+    telegram_ok = _send_telegram(telegram_body)
+    print(f"notify_refresh: subject='{subject}' email={email_ok} telegram={telegram_ok}")
     return 0  # Notification failures never fail the task.
 
 
