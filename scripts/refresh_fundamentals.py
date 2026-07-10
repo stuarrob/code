@@ -49,29 +49,61 @@ SMOKE_TICKERS = ["VOO", "VTI", "VUG", "VYM"]
 MIN_COVERAGE_FRAC = 0.20
 
 
-def _load_universe() -> list[str]:
-    """Pull the full ETF universe from the comprehensive list."""
+def _load_universe(source: str = "union") -> list[str]:
+    """Assemble the ETF universe from one or both of two sources.
+
+    Args:
+        source: which universe to load.
+            "defined"      -> just comprehensive_etf_list.py (hand-curated,
+                              ~800 tickers, no leveraged/inverse/single-stock)
+            "price_cache"  -> every ticker with a parquet in ib_historical
+                              (~5000 today, includes noise: leveraged, tiny AUM)
+            "union"        -> the union of both. Default for --full so the
+                              fundamentals cache covers anything we might score.
+                              Costs 2 API calls per new ticker vs "defined".
+
+    Returns:
+        sorted list of unique tickers.
+    """
     from src.data_collection.comprehensive_etf_list import COMPREHENSIVE_ETF_UNIVERSE
-    universe: set[str] = set()
+    from pathlib import Path
+
+    defined: set[str] = set()
     for tickers in COMPREHENSIVE_ETF_UNIVERSE.values():
-        universe.update(tickers)
-    return sorted(universe)
+        defined.update(tickers)
+
+    cache_dir = Path.home() / "trade_data" / "ETFTrader" / "ib_historical"
+    price_cache = {
+        p.stem for p in cache_dir.glob("*.parquet")
+        if p.stem != "manifest"
+    }
+
+    if source == "defined":
+        return sorted(defined)
+    if source == "price_cache":
+        return sorted(price_cache)
+    if source == "union":
+        return sorted(defined | price_cache)
+    raise ValueError(f"unknown universe source: {source}")
 
 
 def _print_frame(df) -> None:
-    cols = ["ticker", "pe_ratio", "pb_ratio", "dividend_yield", "as_of", "source"]
+    cols = ["ticker", "dividend_yield", "expense_ratio", "aum", "pe_ratio", "pb_ratio", "source"]
+    # Only include columns actually present (guards against missing new fields).
+    cols = [c for c in cols if c in df.columns]
     print(df[cols].to_string(index=False))
 
 
 def _print_coverage(report: dict) -> None:
     print()
     print("Coverage:")
-    print(f"  total tickers:      {report['total']}")
+    print(f"  total tickers:       {report['total']}")
     print(f"  any field populated: {report['any_field']} "
           f"({report.get('any_field_pct', 0.0):.1%})")
+    print(f"  Div-yield populated: {report['dy']}")
+    print(f"  Expense-ratio pop:   {report.get('er', 0)}")
     print(f"  P/E populated:       {report['pe']}")
     print(f"  P/B populated:       {report['pb']}")
-    print(f"  Div-yield populated: {report['dy']}")
     print("  by source:")
     for src, n in sorted(report.get("by_source", {}).items(), key=lambda kv: -kv[1]):
         print(f"    {src:12s} {n}")
@@ -88,6 +120,10 @@ def main() -> int:
                    help="Parallelise across issuer scrapers. Default: on for --full, off for --smoke.")
     p.add_argument("--workers", type=int, default=5)
     p.add_argument("--cache-path", type=Path, default=DEFAULT_CACHE_PATH)
+    p.add_argument("--source", choices=("defined", "price_cache", "union"),
+                   default="union",
+                   help="Universe source for --full. Default 'union' covers "
+                        "everything we have prices for (broadest coverage).")
     args = p.parse_args()
 
     router = FundamentalsRouter()
@@ -101,10 +137,10 @@ def main() -> int:
         return 0
 
     # --full
-    universe = _load_universe()
+    universe = _load_universe(args.source)
     parallel = True if args.parallel is None else args.parallel
     print(f"Full refresh: fetching {len(universe)} tickers "
-          f"(parallel={parallel}, workers={args.workers})")
+          f"(source={args.source}, parallel={parallel}, workers={args.workers})")
 
     df = router.fetch_many(universe, parallel=parallel, max_workers=args.workers)
     report = coverage_report(df)

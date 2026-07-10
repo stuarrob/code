@@ -79,10 +79,16 @@ class Fundamentals:
     Attributes:
         ticker: ETF symbol as it appears in the price cache.
         pe_ratio: Weighted-average price-to-earnings of underlying holdings.
-        pb_ratio: Weighted-average price-to-book.
+            FMP Premium tier does not currently publish this at the fund
+            level — expect NaN until a source with holdings-based P/E is
+            plumbed in.
+        pb_ratio: Weighted-average price-to-book. Same limitation as P/E.
         dividend_yield: Trailing 12-month distribution yield, expressed as a
-            decimal (0.025 = 2.5%). Issuer conventions vary — the scraper
-            must translate to decimal before returning.
+            decimal (0.025 = 2.5%). Populated from FMP profile.
+        expense_ratio: Annual management fee as a decimal (0.0003 = 3bps).
+            Populated from FMP etf/info. Used by value_factor as the
+            cost-efficiency component.
+        aum: Assets under management in USD.
         as_of: Date the issuer reports the number for. Not the fetch date.
         source: Human-readable issuer identifier for provenance tracking.
         schema_version: Bump when the parser changes so cached data can be
@@ -92,6 +98,8 @@ class Fundamentals:
     pe_ratio: float = float("nan")
     pb_ratio: float = float("nan")
     dividend_yield: float = float("nan")
+    expense_ratio: float = float("nan")
+    aum: float = float("nan")
     as_of: Optional[str] = None
     source: str = "unknown"
     schema_version: int = 1
@@ -102,6 +110,8 @@ class Fundamentals:
             "pe_ratio": self.pe_ratio,
             "pb_ratio": self.pb_ratio,
             "dividend_yield": self.dividend_yield,
+            "expense_ratio": self.expense_ratio,
+            "aum": self.aum,
             "as_of": self.as_of,
             "source": self.source,
             "schema_version": self.schema_version,
@@ -114,6 +124,7 @@ class Fundamentals:
             pd.isna(self.pe_ratio)
             and pd.isna(self.pb_ratio)
             and pd.isna(self.dividend_yield)
+            and pd.isna(self.expense_ratio)
         )
 
 
@@ -256,7 +267,12 @@ class FmpScraper(IssuerScraper):
         return self.api_key is not None
 
     def fetch(self, ticker: str) -> Fundamentals:
-        """Fetch profile, compute yield, return.
+        """Fetch profile + etf/info; merge into a single Fundamentals row.
+
+        Two API calls per ticker — profile gives yield, etf/info gives
+        expense ratio and AUM. Doubles the call count vs profile-only but
+        we're on Premium quota and the extra field materially improves the
+        value factor.
 
         On any failure returns an empty Fundamentals with source='fmp' so
         the router can distinguish 'we tried and got nothing' from 'no
@@ -264,54 +280,99 @@ class FmpScraper(IssuerScraper):
         """
         if not self.api_key:
             return self._empty(ticker)
+        profile = self._fetch_profile(ticker)
+        etf_info = self._fetch_etf_info(ticker)
+        return self._merge(ticker, profile, etf_info)
+
+    def _fetch_profile(self, ticker: str) -> Optional[dict]:
+        """Return the profile payload row or None on any failure."""
         url = f"{self._BASE_URL}/profile"
         resp = self._get(url, params={"symbol": ticker.upper(), "apikey": self.api_key})
         if resp is None:
-            return self._empty(ticker)
+            return None
         try:
             payload = resp.json()
         except ValueError:
-            logger.warning(f"fmp: {ticker} returned non-JSON body")
-            return self._empty(ticker)
-        return self._parse_profile(ticker, payload)
+            logger.warning(f"fmp: {ticker} profile returned non-JSON body")
+            return None
+        if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+            return payload[0]
+        return None
 
-    def _parse_profile(self, ticker: str, payload) -> Fundamentals:
-        """Extract yield from the profile response.
+    def _fetch_etf_info(self, ticker: str) -> Optional[dict]:
+        """Return the etf/info payload row or None on any failure.
 
-        FMP returns a list even for a single-symbol query. When the symbol
-        is unknown they return `[]`. When it exists they return
-        `[{...one-row-object...}]`.
+        Non-ETFs (stocks passed by mistake) get a 404 or empty list — we
+        return None and the merge step falls through, leaving expense_ratio
+        NaN which is the honest state.
         """
-        if not isinstance(payload, list) or not payload:
-            return self._empty(ticker)
-        row = payload[0]
-        if not isinstance(row, dict):
-            return self._empty(ticker)
+        url = f"{self._BASE_URL}/etf/info"
+        resp = self._get(url, params={"symbol": ticker.upper(), "apikey": self.api_key})
+        if resp is None:
+            return None
+        try:
+            payload = resp.json()
+        except ValueError:
+            return None
+        if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+            return payload[0]
+        return None
 
-        last_div = _as_float(row.get("lastDividend"))
-        price = _as_float(row.get("price"))
-        if pd.isna(last_div) or pd.isna(price) or price <= 0:
-            div_yield = float("nan")
-        else:
-            div_yield = last_div / price
-            # Sanity clamp — anything above 30% is almost certainly a data
-            # error (leveraged ETFs and MLPs can look extreme). Log and NaN.
-            if div_yield > 0.30:
-                logger.warning(
-                    f"fmp: {ticker} implied yield {div_yield:.1%} exceeds 30% "
-                    f"sanity threshold (lastDividend={last_div}, price={price}) — dropping"
-                )
-                div_yield = float("nan")
+    def _merge(self, ticker: str, profile: Optional[dict],
+               etf_info: Optional[dict]) -> Fundamentals:
+        """Combine profile + etf/info into a Fundamentals row.
+
+        If both are None the result is an empty Fundamentals (routes
+        properly through is_covered → False).
+        """
+        # Dividend yield from profile.
+        div_yield = float("nan")
+        if profile:
+            last_div = _as_float(profile.get("lastDividend"))
+            price = _as_float(profile.get("price"))
+            if not pd.isna(last_div) and not pd.isna(price) and price > 0:
+                y = last_div / price
+                # Sanity clamp — anything above 30% is almost certainly a data
+                # error (leveraged / MLPs can look extreme). Log and NaN.
+                if y > 0.30:
+                    logger.warning(
+                        f"fmp: {ticker} implied yield {y:.1%} exceeds 30% sanity "
+                        f"threshold (lastDividend={last_div}, price={price}) — dropping"
+                    )
+                else:
+                    div_yield = y
+
+        # Expense ratio and AUM from etf/info.
+        # FMP publishes expense ratio in whole-percentage form (0.03 = 3bps
+        # OR 0.03 = 3% depending on the fund's own convention). Empirically
+        # in the etf/info payload it is in percent form (e.g. XLK -> 0.08 = 0.08%).
+        # We keep it in that form and let value_factor rank monotonically.
+        expense_ratio = float("nan")
+        aum = float("nan")
+        if etf_info:
+            expense_ratio = _as_float(etf_info.get("expenseRatio"))
+            aum = _as_float(etf_info.get("assetsUnderManagement"))
 
         return Fundamentals(
             ticker=ticker,
-            pe_ratio=float("nan"),   # Available on Premium tier
-            pb_ratio=float("nan"),   # Available on Premium tier
+            pe_ratio=float("nan"),   # Not available at fund level on Premium tier
+            pb_ratio=float("nan"),   # Not available at fund level on Premium tier
             dividend_yield=div_yield,
-            as_of=None,              # profile endpoint does not carry a snapshot date
+            expense_ratio=expense_ratio,
+            aum=aum,
+            as_of=None,
             source=self.name,
             schema_version=self.schema_version,
         )
+
+    def _parse_profile(self, ticker: str, payload) -> Fundamentals:
+        """Legacy helper retained for unit tests — parses just the profile.
+
+        Prefer `_merge()` in production. Tests exercise this helper because
+        it's simple and pinpoints the yield-computation logic.
+        """
+        row = payload[0] if isinstance(payload, list) and payload else None
+        return self._merge(ticker, row, None)
 
 
 # ────────────────────────────────────────────────────────────────
@@ -422,9 +483,13 @@ def coverage_report(df: pd.DataFrame) -> dict:
     """
     total = len(df)
     if total == 0:
-        return {"total": 0, "any_field": 0, "pe": 0, "pb": 0, "dy": 0,
+        return {"total": 0, "any_field": 0, "pe": 0, "pb": 0, "dy": 0, "er": 0,
                 "any_field_pct": 0.0}
-    any_field = int((~df[["pe_ratio", "pb_ratio", "dividend_yield"]].isna().all(axis=1)).sum())
+    coverage_cols = ["pe_ratio", "pb_ratio", "dividend_yield"]
+    # expense_ratio might not exist on older cached frames — be permissive.
+    if "expense_ratio" in df.columns:
+        coverage_cols.append("expense_ratio")
+    any_field = int((~df[coverage_cols].isna().all(axis=1)).sum())
     return {
         "total": total,
         "any_field": any_field,
@@ -432,6 +497,7 @@ def coverage_report(df: pd.DataFrame) -> dict:
         "pe": int(df["pe_ratio"].notna().sum()),
         "pb": int(df["pb_ratio"].notna().sum()),
         "dy": int(df["dividend_yield"].notna().sum()),
+        "er": int(df["expense_ratio"].notna().sum()) if "expense_ratio" in df.columns else 0,
         "by_source": df["source"].value_counts().to_dict(),
     }
 

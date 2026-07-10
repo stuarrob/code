@@ -287,3 +287,46 @@ class TestFmpParseProfile:
         without_key.api_key = None  # explicitly nuke env-loaded key
         assert with_key.matches("ANYTHING")
         assert not without_key.matches("ANYTHING")
+
+
+class TestFmpMerge:
+    """Unit tests for _merge — the profile+etf/info combiner.
+
+    Verified against the actual FMP Premium responses on 2026-07-10:
+    profile returns lastDividend + price; etf/info returns expenseRatio +
+    assetsUnderManagement. Fund-level P/E/P/B are NOT available at any FMP
+    tier (verified against VOO, SPY, QQQ, VYM, SCHD returning empty on
+    key-metrics-ttm and ratios-ttm).
+    """
+    def _scraper(self):
+        return FmpScraper(config=ScraperConfig(request_delay_sec=0.0), api_key="test-key")
+
+    def test_merge_both_present(self):
+        profile = {"symbol": "VOO", "price": 690.69, "lastDividend": 7.3456}
+        etf_info = {"symbol": "VOO", "expenseRatio": 0.03, "assetsUnderManagement": 1_679_000_000_000}
+        result = self._scraper()._merge("VOO", profile, etf_info)
+        assert result.dividend_yield == pytest.approx(0.01064, rel=1e-3)
+        assert result.expense_ratio == pytest.approx(0.03)
+        assert result.aum == pytest.approx(1_679_000_000_000)
+        assert math.isnan(result.pe_ratio)  # Confirmed unavailable on FMP Premium
+        assert math.isnan(result.pb_ratio)
+        assert result.is_covered
+
+    def test_merge_profile_only(self):
+        profile = {"price": 100.0, "lastDividend": 3.0}
+        result = self._scraper()._merge("X", profile, None)
+        assert result.dividend_yield == pytest.approx(0.03)
+        assert math.isnan(result.expense_ratio)
+        assert result.is_covered
+
+    def test_merge_etf_info_only(self):
+        etf_info = {"expenseRatio": 0.08, "assetsUnderManagement": 500_000_000}
+        result = self._scraper()._merge("XLK", None, etf_info)
+        assert math.isnan(result.dividend_yield)
+        assert result.expense_ratio == pytest.approx(0.08)
+        assert result.is_covered
+
+    def test_merge_both_none(self):
+        result = self._scraper()._merge("X", None, None)
+        assert not result.is_covered
+        assert result.source == "fmp"
