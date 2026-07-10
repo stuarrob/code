@@ -29,6 +29,9 @@ COMPREHENSIVE_ETF_UNIVERSE = {
         "THRM",
         "BBUS",
         "DFUS",
+        "QQQ",   # Invesco NASDAQ-100 — flagship mainstream ETF (added 2026-07-10)
+        "DIA",   # SPDR Dow Jones Industrial Average
+        "RSP",   # Invesco S&P 500 Equal Weight
     ],
     "US_Broad_Mid": [
         "IJH",

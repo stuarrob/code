@@ -139,33 +139,83 @@ def get_excluded_universe_tickers() -> Set[str]:
     return out
 
 
+def get_curated_universe_tickers() -> Set[str]:
+    """The hand-curated smart-beta ETF universe from
+    `src.data_collection.comprehensive_etf_list.COMPREHENSIVE_ETF_UNIVERSE`,
+    MINUS the excluded categories (commodities, currency, volatility).
+
+    This is the operator's declared design intent: a defensible universe
+    of factor/sector/broad-market/dividend/international/bond ETFs,
+    hand-picked category by category, with leveraged/inverse/commodity/
+    currency/vol screened out. About 720 tickers.
+    """
+    try:
+        from src.data_collection.comprehensive_etf_list import COMPREHENSIVE_ETF_UNIVERSE
+    except ModuleNotFoundError:
+        return set()
+    out: Set[str] = set()
+    for cat_name, tickers in COMPREHENSIVE_ETF_UNIVERSE.items():
+        if any(cat_name.startswith(p) for p in EXCLUDED_CATEGORY_PREFIXES):
+            continue
+        out.update(tickers)
+    return out
+
+
 def filter_universe(
     tickers: List[str],
     etf_names: pd.Series = None,
+    use_curated: bool = True,
 ) -> List[str]:
-    """The full smart-beta universe screen: no leverage/inverse, no
-    commodity, no currency, no volatility products.
+    """The full smart-beta universe screen.
 
-    This is the operator's declared design intent (see chat 2026-07-10).
-    Used by both the live pipeline (`portfolio.pipeline.score_factors`)
-    and the multi-regime backtest diagnostic — they must apply the same
-    screen or the backtest is not a fair simulation of live behaviour.
+    Default (use_curated=True): restrict to the operator's curated
+    smart-beta universe (hand-picked categories in
+    `comprehensive_etf_list.py`), minus excluded categories, minus any
+    leveraged/inverse tickers that slipped through category curation.
+    This is what the live strategy runs on.
+
+    Alternative (use_curated=False): apply category + leveraged filters
+    to the input list but don't restrict to the curated universe. Kept
+    for diagnostic purposes only; not for live use, since the
+    hand-curation excludes many niche/thematic ETFs that the flat filter
+    can't detect from the ticker alone (e.g. 2x/3x names not in the
+    enumeration, single-country volatility bombs, ETNs).
     """
     excluded_category = get_excluded_universe_tickers()
-    filtered = []
-    excluded = []
-    for ticker in tickers:
-        name = etf_names.get(ticker) if etf_names is not None else None
-        if is_leveraged_etf(ticker, name):
-            excluded.append((ticker, "leveraged/inverse"))
-            continue
-        if ticker.upper() in excluded_category:
-            excluded.append((ticker, "commodity/currency/vol category"))
-            continue
-        filtered.append(ticker)
-    if excluded:
-        print(f"filter_universe: dropped {len(excluded)} tickers "
-              f"(leveraged/category-excluded); kept {len(filtered)}")
+    filtered: List[str] = []
+    dropped_leveraged = 0
+    dropped_category = 0
+    dropped_uncurated = 0
+
+    if use_curated:
+        curated = get_curated_universe_tickers()
+        for ticker in tickers:
+            if ticker not in curated:
+                dropped_uncurated += 1
+                continue
+            name = etf_names.get(ticker) if etf_names is not None else None
+            if is_leveraged_etf(ticker, name):
+                dropped_leveraged += 1
+                continue
+            if ticker.upper() in excluded_category:
+                dropped_category += 1
+                continue
+            filtered.append(ticker)
+        print(f"filter_universe (curated): kept {len(filtered)}; dropped "
+              f"{dropped_uncurated} non-curated, {dropped_leveraged} leveraged, "
+              f"{dropped_category} excluded-category")
+    else:
+        for ticker in tickers:
+            name = etf_names.get(ticker) if etf_names is not None else None
+            if is_leveraged_etf(ticker, name):
+                dropped_leveraged += 1
+                continue
+            if ticker.upper() in excluded_category:
+                dropped_category += 1
+                continue
+            filtered.append(ticker)
+        print(f"filter_universe (flat): kept {len(filtered)}; dropped "
+              f"{dropped_leveraged} leveraged, {dropped_category} excluded-category")
     return filtered
 
 
