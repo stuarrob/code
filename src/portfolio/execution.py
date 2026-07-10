@@ -75,6 +75,10 @@ class OrderResult:
 
     For dry-run mode, `status = "DRY_RUN"` and `order_id` is None.
     For a real fill, `status` mirrors IB's orderStatus.status.
+
+    Fill-related fields (`fill_price`, `filled_qty`, `commission`,
+    `cancel_reason`) are populated by `enrich_receipt_with_fills` after
+    execution completes — they are None immediately post-placement.
     """
     ticker: str
     action: str          # BUY / SELL / EXTEND
@@ -85,6 +89,10 @@ class OrderResult:
     status: str
     message: str
     timestamp: str
+    fill_price: Optional[float] = None
+    filled_qty: Optional[int] = None
+    commission: Optional[float] = None
+    cancel_reason: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -404,4 +412,253 @@ def _error_result(ticker: str, action: str, kind: str, shares: int,
         shares=shares, limit_or_trail_pct=None,
         order_id=None, status="ERROR", message=message,
         timestamp=_now_iso(),
+    )
+
+
+# ────────────────────────────────────────────────────────────────
+# Post-execution enrichment: fills, commissions, cancel reasons
+# ────────────────────────────────────────────────────────────────
+
+def enrich_receipt_with_fills(
+    receipt: ExecutionReceipt,
+    ib: IBExecutor,
+    wait_sec: float = 3.0,
+) -> ExecutionReceipt:
+    """Query IB for actual fill data and update the receipt.
+
+    For each OrderResult in the receipt, looks up the matching
+    ib.trades() entry by orderId and pulls:
+      - fill_price (weighted average across fills)
+      - filled_qty (integer share count)
+      - commission (sum across fills; USD)
+      - cancel_reason (from Trade.log when status is Cancelled)
+
+    Args:
+        receipt: the receipt from execute_proposal.
+        ib: live ib_insync IB client.
+        wait_sec: seconds to sleep first so IB has time to report fills.
+
+    Returns:
+        A NEW ExecutionReceipt with enriched OrderResults. The input
+        receipt is not mutated (frozen dataclass).
+    """
+    if receipt.dry_run:
+        return receipt
+    try:
+        ib.sleep(wait_sec)
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        trades = ib.trades()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"enrich_receipt_with_fills: ib.trades() failed: {exc}")
+        return receipt
+
+    by_id = {}
+    for t in trades:
+        order_id = getattr(t.order, "orderId", None)
+        if order_id is None:
+            continue
+        by_id[order_id] = t
+
+    def _enrich(r: OrderResult) -> OrderResult:
+        if r.order_id is None or r.order_id not in by_id:
+            return r
+        trade = by_id[r.order_id]
+        fills = getattr(trade, "fills", []) or []
+        filled_qty = 0
+        weighted_price_num = 0.0
+        commission_total = 0.0
+        for f in fills:
+            exe = getattr(f, "execution", None)
+            cr = getattr(f, "commissionReport", None)
+            if exe is not None:
+                shares = float(getattr(exe, "shares", 0.0))
+                price = float(getattr(exe, "avgPrice", 0.0))
+                filled_qty += shares
+                weighted_price_num += shares * price
+            if cr is not None:
+                c = getattr(cr, "commission", 0.0)
+                if c and c == c:  # NaN guard
+                    commission_total += float(c)
+
+        fill_price = (
+            weighted_price_num / filled_qty if filled_qty > 0 else None
+        )
+
+        # Cancel reason from the last log entry when status is Cancelled.
+        cancel_reason = None
+        if r.status.lower().startswith("cancel"):
+            log_entries = getattr(trade, "log", []) or []
+            if log_entries:
+                last = log_entries[-1]
+                cancel_reason = str(getattr(last, "message", "")) or None
+
+        # Update status too — orderStatus may have advanced since placement.
+        current_status = getattr(
+            getattr(trade, "orderStatus", None), "status", r.status
+        )
+
+        return OrderResult(
+            ticker=r.ticker, action=r.action, order_kind=r.order_kind,
+            shares=r.shares, limit_or_trail_pct=r.limit_or_trail_pct,
+            order_id=r.order_id,
+            status=current_status,
+            message=r.message, timestamp=r.timestamp,
+            fill_price=fill_price,
+            filled_qty=int(filled_qty) if filled_qty > 0 else None,
+            commission=commission_total if commission_total > 0 else None,
+            cancel_reason=cancel_reason,
+        )
+
+    return ExecutionReceipt(
+        started_at=receipt.started_at,
+        finished_at=receipt.finished_at,
+        dry_run=receipt.dry_run,
+        n_trades=receipt.n_trades,
+        results=tuple(_enrich(r) for r in receipt.results),
+        trail_results=tuple(_enrich(r) for r in receipt.trail_results),
+        errors=receipt.errors,
+        audit_log_path=receipt.audit_log_path,
+    )
+
+
+# ────────────────────────────────────────────────────────────────
+# Retry: resubmit cancelled orders as marketable-limit
+# ────────────────────────────────────────────────────────────────
+
+def retry_cancelled_market_orders(
+    receipt: ExecutionReceipt,
+    original_trades: dict[str, "Trade"],
+    ib: IBExecutor,
+    dry_run: bool = True,
+    audit_dir: Path = DEFAULT_AUDIT_DIR,
+    limit_offset_bps: float = 50.0,
+    ack_wait_sec: float = _ACK_WAIT_SEC,
+) -> ExecutionReceipt:
+    """Re-submit any market orders that came back Cancelled as LMTs.
+
+    Marketable-limit style: for SELL, place a LMT at `market_price *
+    (1 - offset)`; for BUY, `market_price * (1 + offset)`. Offset
+    defaults to 50 bps, which sits just inside the typical spread on
+    liquid ETFs and is aggressive enough to fill promptly.
+
+    Args:
+        receipt: the original execution receipt.
+        original_trades: `{ticker → Trade}` from the source proposal,
+            needed to look up the reference market_price for each retry.
+        ib: live ib_insync IB client.
+        dry_run: True (default) constructs payloads and writes audit
+            but does not place.
+        audit_dir: separate audit log for the retry pass.
+        limit_offset_bps: how far off market to place the LMT.
+        ack_wait_sec: sleep after placement to allow IB ack.
+
+    Returns:
+        A new ExecutionReceipt containing only the retry rows.
+    """
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    audit_path = audit_dir / (
+        f"retry_{datetime.utcnow():%Y%m%d_%H%M%S}.jsonl"
+    )
+    audit_fh = audit_path.open("w", encoding="utf-8")
+
+    started_at = _now_iso()
+    results: list[OrderResult] = []
+
+    cancelled = [
+        r for r in receipt.results
+        if r.status.lower().startswith("cancel") and r.order_kind == "MKT"
+    ]
+
+    try:
+        for r in cancelled:
+            trade = original_trades.get(r.ticker)
+            if trade is None:
+                results.append(_error_result(
+                    r.ticker, r.action, "LMT", r.shares,
+                    "retry: no source trade found for limit-price reference",
+                ))
+                continue
+
+            ref_price = trade.market_price
+            if r.action == "SELL":
+                limit_price = ref_price * (1 - limit_offset_bps / 10_000.0)
+                ib_side = "SELL"
+            else:
+                limit_price = ref_price * (1 + limit_offset_bps / 10_000.0)
+                ib_side = "BUY"
+            limit_price = round(limit_price, 2)
+
+            shares = r.shares
+            if dry_run:
+                result = OrderResult(
+                    ticker=r.ticker, action=r.action, order_kind="LMT",
+                    shares=shares, limit_or_trail_pct=None,
+                    order_id=None, status="DRY_RUN",
+                    message=(
+                        f"DRY_RUN {ib_side} {shares} {r.ticker} @ LMT "
+                        f"{limit_price:.2f} (retry, offset {limit_offset_bps:.0f}bps)"
+                    ),
+                    timestamp=_now_iso(),
+                )
+                results.append(result)
+                _write_audit(audit_fh, result, None)
+                continue
+
+            try:
+                from ib_insync import Stock, LimitOrder
+            except ImportError as exc:
+                results.append(_error_result(
+                    r.ticker, r.action, "LMT", shares,
+                    f"ib_insync not installed: {exc}",
+                ))
+                continue
+
+            contract = Stock(r.ticker, "SMART", "USD")
+            try:
+                ib.qualifyContracts(contract)
+            except Exception as exc:  # noqa: BLE001
+                results.append(_error_result(
+                    r.ticker, r.action, "LMT", shares,
+                    f"qualifyContracts failed: {exc}",
+                ))
+                continue
+
+            order = LimitOrder(ib_side, shares, limit_price)
+            try:
+                trade_obj = ib.placeOrder(contract, order)
+                ib.sleep(ack_wait_sec)
+                status = trade_obj.orderStatus.status
+                order_id = getattr(trade_obj.order, "orderId", None)
+                result = OrderResult(
+                    ticker=r.ticker, action=r.action, order_kind="LMT",
+                    shares=shares, limit_or_trail_pct=None,
+                    order_id=order_id, status=status,
+                    message=(
+                        f"{ib_side} {shares} {r.ticker} @ LMT "
+                        f"{limit_price:.2f} (retry)"
+                    ),
+                    timestamp=_now_iso(),
+                )
+                results.append(result)
+                _write_audit(audit_fh, result, None)
+            except Exception as exc:  # noqa: BLE001
+                results.append(_error_result(
+                    r.ticker, r.action, "LMT", shares,
+                    f"placeOrder failed: {exc}",
+                ))
+    finally:
+        audit_fh.close()
+
+    return ExecutionReceipt(
+        started_at=started_at,
+        finished_at=_now_iso(),
+        dry_run=dry_run,
+        n_trades=len(cancelled),
+        results=tuple(results),
+        trail_results=tuple(),
+        errors=tuple(),
+        audit_log_path=str(audit_path),
     )

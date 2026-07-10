@@ -56,7 +56,9 @@ from src.portfolio.explain import (
 )
 from src.portfolio.execution import (
     DEFAULT_AUDIT_DIR,
+    enrich_receipt_with_fills,
     execute_proposal,
+    retry_cancelled_market_orders,
 )
 from src.data_collection.issuer_fundamentals import load_fundamentals_series
 from src.data_collection.ticker_metadata import enrich_tickers
@@ -1333,26 +1335,232 @@ with tab_summary:
         )
 
         # ────────────────────────────────────────────────────
-        # Order-by-order results
+        # Enrich receipt with fills / commissions
         # ────────────────────────────────────────────────────
-        st.subheader("Order results")
+        st.subheader("Cost summary")
+        ec1, ec2 = st.columns([1, 3])
+        with ec1:
+            if st.button("Fetch fills + commissions from IB"):
+                with st.spinner(
+                    "Querying IB for actual fill prices and commissions…"
+                ):
+                    for cid in range(60, 70):
+                        try:
+                            ib_read = connect_read_only(
+                                host=DEFAULT_IB_HOST, port=DEFAULT_IB_PORT,
+                                client_id=cid,
+                            )
+                            enriched = enrich_receipt_with_fills(
+                                receipt, ib_read, wait_sec=2.0,
+                            )
+                            try:
+                                ib_read.disconnect()
+                            except Exception:
+                                pass
+                            st.session_state["execution_receipt"] = enriched
+                            receipt = enriched
+                            break
+                        except Exception as exc:  # noqa: BLE001
+                            if ("326" in str(exc) or "already in use" in str(exc)):
+                                continue
+                            st.error(f"Fetch failed: {exc}")
+                            break
+        with ec2:
+            st.caption(
+                "Queries IB via `ib.trades()` for the actual weighted "
+                "average fill price and commission per order ID. Also "
+                "picks up cancel reasons for orders IB rejected."
+            )
+
+        # If enriched, compute cost totals.
         all_orders = list(receipt.results) + list(receipt.trail_results)
+        total_commission = sum(
+            r.commission for r in all_orders if r.commission
+        )
+        # Slippage = (fill - reference) * signed shares.
+        total_notional = 0.0
+        total_slippage = 0.0
+        signed_slippage = 0.0
+        # Look up reference prices from the original proposal.
+        proposal = st.session_state.get("proposed_trades")
+        ref_prices = {
+            t.ticker: t.market_price for t in (proposal.trades if proposal else [])
+        }
+        for r in receipt.results:  # only market orders count for slippage
+            if r.fill_price is None or r.filled_qty is None:
+                continue
+            ref = ref_prices.get(r.ticker)
+            if ref is None:
+                continue
+            notional = abs(r.filled_qty) * r.fill_price
+            total_notional += notional
+            # For BUY / EXTEND: slippage cost = (fill - ref) * qty (positive is bad).
+            # For SELL: slippage cost = (ref - fill) * qty (positive is bad).
+            if r.action == "SELL":
+                slip = (ref - r.fill_price) * r.filled_qty
+            else:
+                slip = (r.fill_price - ref) * r.filled_qty
+            total_slippage += abs(slip)
+            signed_slippage += slip
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total commission", f"${total_commission:,.2f}")
+        c2.metric("Absolute slippage vs proposal price", f"${total_slippage:,.2f}")
+        c3.metric("Net slippage cost", f"${signed_slippage:,.2f}",
+                  help="Positive = worse than proposal reference price")
+        c4.metric(
+            "All-in cost",
+            f"${total_commission + signed_slippage:,.2f}",
+            f"{(total_commission + signed_slippage) / max(total_notional, 1) * 10_000:.1f} bps"
+            if total_notional > 0 else "—",
+        )
+        if not any(r.fill_price for r in all_orders):
+            st.caption(
+                "Fill prices not yet populated. Click the button above to "
+                "query IB, or wait a few seconds and try again if you just "
+                "sent the orders."
+            )
+
+        # ────────────────────────────────────────────────────
+        # Full scrollable order log
+        # ────────────────────────────────────────────────────
+        st.subheader(f"Order log ({len(all_orders)} orders)")
+        st.caption(
+            "Every attempt written to `~/trade_data/ETFTrader/execution_log/`. "
+            "Scroll for the full detail."
+        )
         result_df = pd.DataFrame([
             {
-                "Ticker": r.ticker, "Action": r.action, "Order": r.order_kind,
+                "Ticker": r.ticker,
+                "Action": r.action,
+                "Order": r.order_kind,
                 "Shares": r.shares,
+                "Filled": r.filled_qty if r.filled_qty is not None else "—",
+                "Fill price": (f"${r.fill_price:.4f}"
+                                if r.fill_price is not None else "—"),
+                "Commission": (f"${r.commission:.2f}"
+                                if r.commission is not None else "—"),
                 "Trail %": (f"{r.limit_or_trail_pct:.0%}"
                             if r.limit_or_trail_pct is not None else "—"),
                 "Order ID": r.order_id if r.order_id is not None else "—",
-                "Status": r.status, "Message": r.message,
+                "Status": r.status,
+                "Reason / message": (
+                    r.cancel_reason if r.cancel_reason else r.message
+                ),
                 "Time": r.timestamp,
             }
             for r in all_orders
         ])
-        st.dataframe(result_df, hide_index=True, use_container_width=True)
+        # Sort so failures rise to the top.
+        failure_status = {"Cancelled", "Rejected", "Inactive", "ERROR"}
+        result_df["_ord"] = result_df["Status"].map(
+            lambda s: 0 if s in failure_status else 1
+        )
+        result_df = result_df.sort_values(["_ord", "Ticker"]).drop(columns="_ord")
+        # Height ~600 makes it a proper scrollable log; still respects grid.
+        st.dataframe(
+            result_df, hide_index=True, use_container_width=True, height=600,
+        )
+
+        # ────────────────────────────────────────────────────
+        # Failures + retry
+        # ────────────────────────────────────────────────────
+        failed = [
+            r for r in receipt.results
+            if r.status in failure_status and r.order_kind == "MKT"
+        ]
+        if failed:
+            st.subheader(f"⚠ {len(failed)} failed market orders")
+            st.markdown(
+                "Common cause for **Cancelled** SELLs on thinly-traded ETFs at "
+                "end-of-day: IB's marketable-limit protection rejects MKT "
+                "orders that would cross too far from the last print. The "
+                "retry below resubmits these as **LMT** orders at a 50 bps "
+                "aggressive-cross offset (SELL below bid, BUY above ask), "
+                "which typically fills promptly during regular hours."
+            )
+            fail_df = pd.DataFrame([
+                {
+                    "Ticker": r.ticker, "Action": r.action,
+                    "Shares": r.shares, "Status": r.status,
+                    "Reason": r.cancel_reason or r.message,
+                }
+                for r in failed
+            ])
+            st.dataframe(fail_df, hide_index=True, use_container_width=True)
+
+            rc1, rc2 = st.columns([1, 3])
+            with rc1:
+                do_retry = st.button(
+                    "Retry failed as LMT (50 bps aggressive)",
+                    type="primary",
+                    disabled=proposal is None,
+                )
+            with rc2:
+                st.caption(
+                    "Places one LMT per cancelled MKT order at reference "
+                    "price × (1 ± 0.5%). Written to a separate audit log. "
+                    "Trailing stops are NOT reattached — those from the "
+                    "original BUY/EXTEND cover the intended positions "
+                    "already (or should).")
+
+            if do_retry:
+                with st.status("Retrying via LMT…", expanded=True) as sbox:
+                    for cid in range(70, 80):
+                        try:
+                            from ib_insync import IB as _IB
+                            ib_write = _IB()
+                            ib_write.connect(
+                                DEFAULT_IB_HOST, DEFAULT_IB_PORT,
+                                clientId=cid, readonly=False, timeout=10,
+                            )
+                            retry_receipt = retry_cancelled_market_orders(
+                                receipt=receipt,
+                                original_trades={
+                                    t.ticker: t for t in proposal.trades
+                                },
+                                ib=ib_write, dry_run=False,
+                                audit_dir=DEFAULT_AUDIT_DIR,
+                                limit_offset_bps=50.0,
+                            )
+                            try:
+                                ib_write.disconnect()
+                            except Exception:
+                                pass
+                            st.session_state["retry_receipt"] = retry_receipt
+                            sbox.update(
+                                label=(
+                                    f"Retry complete — "
+                                    f"{retry_receipt.n_ok} OK / "
+                                    f"{retry_receipt.n_failed} failed. "
+                                    f"Audit: {retry_receipt.audit_log_path}"
+                                ),
+                                state="complete", expanded=False,
+                            )
+                            break
+                        except Exception as exc:  # noqa: BLE001
+                            if "326" in str(exc) or "already in use" in str(exc):
+                                continue
+                            sbox.update(label=f"Retry failed: {exc}",
+                                         state="error")
+                            break
+
+            retry_receipt = st.session_state.get("retry_receipt")
+            if retry_receipt is not None:
+                st.markdown("**Retry results**")
+                retry_df = pd.DataFrame([
+                    {
+                        "Ticker": r.ticker, "Action": r.action,
+                        "Order": r.order_kind, "Shares": r.shares,
+                        "Status": r.status, "Message": r.message,
+                    }
+                    for r in retry_receipt.results
+                ])
+                st.dataframe(retry_df, hide_index=True,
+                             use_container_width=True)
 
         if receipt.errors:
-            st.subheader("Errors")
+            st.subheader("Setup errors")
             for e in receipt.errors:
                 st.error(e)
 
