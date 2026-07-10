@@ -1,24 +1,17 @@
 #!/usr/bin/env python3
-"""Post-run notification for the weekly ETF cache refresh — email + Telegram.
+"""Post-run notification for the weekly ETF cache refresh — Telegram only.
 
 Called from ``daily_etf_data_windows.cmd`` after ``daily_etf_data.py``
 finishes (or fails). Reads the tail of ``daily_etf.log``, summarises the
 outcome (start time, finish time, exit code, ticker counts, latest bar
-date), and delivers it via:
+date), and sends it via the Telegram Bot API using ``TELEGRAM_TOKEN``
+and ``TELEGRAM_CHAT_ID`` from ``.env``.
 
-  1. **SMTP email** using ``SMTP_HOST``/``SMTP_USER``/``SMTP_PASSWORD``/
-     ``ALERT_EMAIL_TO`` from ``.env``. Fires only if all are populated.
-  2. **Telegram Bot** using ``TELEGRAM_TOKEN`` and ``TELEGRAM_CHAT_ID`` from
-     ``.env``. Fires only if both are populated.
-
-Both channels are attempted; one silently succeeding is enough. Neither
-channel failing causes the wrapper's exit code to change — that would
-make notification hiccups look like data-collection problems.
+A notification failure never changes the wrapper's exit code — that
+would make a Telegram hiccup look like a data-collection problem.
 
 Env vars are loaded from ``.env`` via the ``src/__init__.py`` autoloader
-when this file imports ``src``. For iCloud SMTP you need an app-specific
-password from appleid.apple.com — the regular Apple ID password will
-not authenticate.
+when this file imports ``src``.
 """
 
 from __future__ import annotations
@@ -27,11 +20,9 @@ import argparse
 import json
 import os
 import re
-import smtplib
 import sys
 import urllib.request
 from datetime import datetime
-from email.mime.text import MIMEText
 from pathlib import Path
 
 # Ensure .env is loaded (relies on src/__init__.py's autoloader).
@@ -124,7 +115,7 @@ def _compose(status: str, summary: dict, latest_bar: str | None) -> tuple[str, s
         body = (
             f"Weekly ETF cache refresh started at {summary.get('started') or '(unknown)'}.\n"
             f"Estimated finish: ~14 hours (rate-limit bound).\n"
-            f"When it completes you'll get a second email.\n"
+            f"When it completes you'll get a second message.\n"
         )
         return subject, body
 
@@ -166,40 +157,6 @@ def _compose(status: str, summary: dict, latest_bar: str | None) -> tuple[str, s
             "  3. Continue through tabs 3 / 4",
         ]
     return subject, "\n".join(lines)
-
-
-def _send_email(subject: str, body: str) -> bool:
-    host = os.environ.get("SMTP_HOST")
-    port = int(os.environ.get("SMTP_PORT", "587"))
-    user = os.environ.get("SMTP_USER")
-    password = os.environ.get("SMTP_PASSWORD")
-    to = os.environ.get("ALERT_EMAIL_TO")
-    if not all([host, user, password, to]):
-        missing = [k for k in ("SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD", "ALERT_EMAIL_TO")
-                   if not os.environ.get(k)]
-        print(f"notify_refresh: email skipped, missing: {', '.join(missing)}",
-              file=sys.stderr)
-        return False
-
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = user
-    msg["To"] = to
-    try:
-        if port == 465:
-            server = smtplib.SMTP_SSL(host, port, timeout=30)
-        else:
-            server = smtplib.SMTP(host, port, timeout=30)
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-        server.login(user, password)
-        server.sendmail(user, [to], msg.as_string())
-        server.quit()
-    except Exception as exc:  # noqa: BLE001
-        print(f"notify_refresh: SMTP send failed: {exc}", file=sys.stderr)
-        return False
-    return True
 
 
 def _send_telegram(body: str) -> bool:
@@ -263,9 +220,8 @@ def main() -> int:
     # even if the reader only sees the notification snippet.
     telegram_body = f"{subject}\n\n{body}"
 
-    email_ok = _send_email(subject, body)
     telegram_ok = _send_telegram(telegram_body)
-    print(f"notify_refresh: subject='{subject}' email={email_ok} telegram={telegram_ok}")
+    print(f"notify_refresh: subject='{subject}' telegram={telegram_ok}")
     return 0  # Notification failures never fail the task.
 
 
