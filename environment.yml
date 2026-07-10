@@ -48,4 +48,5 @@ dependencies:
       - ib_insync==0.9.86
       - yfinance
       - curl_cffi
+      - anthropic  # LLM narration for the applet Step 5 (Explain)
       # - databento   # secondary project — enable later

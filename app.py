@@ -47,6 +47,12 @@ from src.portfolio.proposal import (
     ACTION_BUY, ACTION_EXTEND, ACTION_SELL,
     propose_trades,
 )
+from src.portfolio.explain import (
+    DEFAULT_ANTHROPIC_MODEL,
+    anthropic_available,
+    narrate_proposal,
+    narrate_with_claude,
+)
 
 DEFAULT_PROCESSED_DIR = Path.home() / "trade_data" / "ETFTrader" / "processed"
 
@@ -807,12 +813,112 @@ with tab_propose:
 with tab_explain:
     st.header("Step 5 — why these trades?")
     st.markdown(
-        "The LLM narrates the deterministic proposal — which factors are "
-        "driving each pick, what the portfolio is tilting toward (e.g. "
-        "*quality*), and what changed vs. the prior snapshot. "
-        "**The LLM does not set sizes or place orders.**"
+        "**Deterministic first, LLM narrates.** The plain-English summary "
+        "below is generated directly from the proposal — the same numbers, "
+        "no LLM in the loop. When an Anthropic API key is configured you "
+        "can also get a richer Claude narration and ask questions about "
+        "specific trades. Claude sees the proposal as ground truth and "
+        "cannot invent or override any number."
     )
-    st.info("Wired after read-only slices (ADR-0001 action item #4).")
+
+    proposal = st.session_state.get("proposed_trades")
+    if proposal is None:
+        st.info("Generate the proposal in tab 4 first.")
+    else:
+        # ────────────────────────────────────────────────────
+        # Deterministic narration — always available
+        # ────────────────────────────────────────────────────
+        deterministic = narrate_proposal(proposal, policy_name=policy.name)
+        st.subheader("Deterministic summary")
+        st.markdown(deterministic)
+
+        # Persist for the record.
+        st.session_state["explanation"] = deterministic
+
+        st.divider()
+
+        # ────────────────────────────────────────────────────
+        # LLM narration + Q&A — optional
+        # ────────────────────────────────────────────────────
+        st.subheader("Claude — narration + Q&A")
+
+        if not anthropic_available():
+            st.info(
+                "**Anthropic Claude is not configured.** To enable, add "
+                "`ANTHROPIC_API_KEY=…` to `.env` and restart the applet. "
+                "Get a key from "
+                "[console.anthropic.com](https://console.anthropic.com/settings/keys). "
+                "Approximate cost: $0.01–0.05 per rebalance narration."
+            )
+        else:
+            c1, c2 = st.columns([1, 3])
+            with c1:
+                model = st.text_input(
+                    "Model", value=DEFAULT_ANTHROPIC_MODEL,
+                    help="Anthropic model ID. Default is a good balance of "
+                         "quality and cost for narration.",
+                )
+                if st.button("Generate LLM narration", type="primary"):
+                    with st.spinner("Claude is reading the proposal…"):
+                        try:
+                            llm_text = narrate_with_claude(
+                                proposal=proposal,
+                                deterministic_narration=deterministic,
+                                user_question=None,
+                                model=model,
+                            )
+                            st.session_state["llm_narration"] = llm_text
+                        except Exception as exc:  # noqa: BLE001
+                            st.error(f"LLM narration failed: {exc}")
+
+            with c2:
+                st.caption(
+                    "Claude is instructed to explain WHY the trades make sense "
+                    "given the factor tilts — not to invent numbers or propose "
+                    "alternatives. If the model contradicts the deterministic "
+                    "summary on a factual claim, trust the deterministic one."
+                )
+
+            llm_narration = st.session_state.get("llm_narration")
+            if llm_narration:
+                st.markdown("**Claude's narration:**")
+                st.markdown(llm_narration)
+
+            st.divider()
+
+            # Q&A
+            st.markdown("**Ask a question about the proposal.**")
+            question = st.text_area(
+                "Question",
+                placeholder="e.g. Why sell XLK? Which trades change the "
+                            "portfolio's momentum tilt most?",
+                height=80,
+                label_visibility="collapsed",
+            )
+            if st.button("Ask Claude", disabled=not question):
+                with st.spinner("Claude is answering…"):
+                    try:
+                        answer = narrate_with_claude(
+                            proposal=proposal,
+                            deterministic_narration=deterministic,
+                            user_question=question,
+                            model=model,
+                        )
+                        # Keep a small Q&A log for the session.
+                        qa_log = st.session_state.setdefault("qa_log", [])
+                        qa_log.append({"q": question, "a": answer})
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(f"Claude Q&A failed: {exc}")
+
+            qa_log = st.session_state.get("qa_log") or []
+            if qa_log:
+                st.markdown("---")
+                st.markdown("**Q&A log this session:**")
+                for i, entry in enumerate(reversed(qa_log[-5:]), 1):
+                    with st.expander(f"Q{len(qa_log) - i + 1}: {entry['q'][:80]}…"
+                                     if len(entry['q']) > 80
+                                     else f"Q{len(qa_log) - i + 1}: {entry['q']}"):
+                        st.markdown(entry["a"])
 
 
 with tab_send:
