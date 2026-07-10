@@ -100,7 +100,7 @@ def test_collect_prices_rejects_tiny_universe(tmp_path, policy):
 
 @pytest.mark.unit
 def test_score_factors_returns_all_active_factors(policy, synthetic_prices):
-    scoring = score_factors(synthetic_prices, policy)
+    scoring = score_factors(synthetic_prices, policy, use_curated=False)
     # No expense ratios provided → value dropped, weights redistribute.
     assert set(scoring.active_weights.keys()) == {"momentum", "quality", "volatility"}
     assert abs(sum(scoring.active_weights.values()) - 1.0) < 1e-6
@@ -113,7 +113,7 @@ def test_score_factors_includes_value_when_expense_ratios_provided(policy, synth
         np.random.uniform(0.0005, 0.007, len(synthetic_prices.columns)),
         index=synthetic_prices.columns,
     )
-    scoring = score_factors(synthetic_prices, policy, expense_ratios=expense)
+    scoring = score_factors(synthetic_prices, policy, expense_ratios=expense, use_curated=False)
     assert "value" in scoring.active_weights
     assert "value" in scoring.factor_scores.columns
     # With value present, weights match the policy exactly.
@@ -123,7 +123,7 @@ def test_score_factors_includes_value_when_expense_ratios_provided(policy, synth
 @pytest.mark.unit
 def test_score_factors_universe_excludes_none(policy, synthetic_prices):
     """A synthetic universe with no leveraged tickers should survive intact."""
-    scoring = score_factors(synthetic_prices, policy)
+    scoring = score_factors(synthetic_prices, policy, use_curated=False)
     assert len(scoring.universe) == synthetic_prices.shape[1]
 
 
@@ -136,7 +136,7 @@ def test_score_factors_missing_expense_ratios_imputed(policy, synthetic_prices):
         index=synthetic_prices.columns,
     )
     expense.iloc[:20] = np.nan  # 20 unknowns
-    scoring = score_factors(synthetic_prices, policy, expense_ratios=expense)
+    scoring = score_factors(synthetic_prices, policy, expense_ratios=expense, use_curated=False)
     assert "value" in scoring.active_weights
 
 
@@ -146,7 +146,7 @@ def test_score_factors_missing_expense_ratios_imputed(policy, synthetic_prices):
 
 @pytest.mark.unit
 def test_optimize_rankbased_returns_target_positions(policy, synthetic_prices):
-    scoring = score_factors(synthetic_prices, policy)
+    scoring = score_factors(synthetic_prices, policy, use_curated=False)
     weights = optimize_portfolio(scoring, synthetic_prices, policy, optimizer_type="rankbased")
     assert len(weights) == policy.num_positions
     assert abs(weights.sum() - 1.0) < 1e-6
@@ -155,14 +155,14 @@ def test_optimize_rankbased_returns_target_positions(policy, synthetic_prices):
 
 @pytest.mark.unit
 def test_optimize_rejects_unknown_optimizer(policy, synthetic_prices):
-    scoring = score_factors(synthetic_prices, policy)
+    scoring = score_factors(synthetic_prices, policy, use_curated=False)
     with pytest.raises(ValueError, match="Unknown optimizer_type"):
         optimize_portfolio(scoring, synthetic_prices, policy, optimizer_type="bogus")
 
 
 @pytest.mark.unit
 def test_optimize_simple_returns_target_positions(policy, synthetic_prices):
-    scoring = score_factors(synthetic_prices, policy)
+    scoring = score_factors(synthetic_prices, policy, use_curated=False)
     weights = optimize_portfolio(scoring, synthetic_prices, policy, optimizer_type="simple")
     assert len(weights) == policy.num_positions
     assert abs(weights.sum() - 1.0) < 1e-6
@@ -174,7 +174,7 @@ def test_optimize_simple_returns_target_positions(policy, synthetic_prices):
 
 @pytest.mark.unit
 def test_portfolio_volatility_positive_finite(policy, synthetic_prices):
-    scoring = score_factors(synthetic_prices, policy)
+    scoring = score_factors(synthetic_prices, policy, use_curated=False)
     weights = optimize_portfolio(scoring, synthetic_prices, policy)
     vol = portfolio_volatility(weights, synthetic_prices)
     assert vol == vol  # not NaN
@@ -183,7 +183,7 @@ def test_portfolio_volatility_positive_finite(policy, synthetic_prices):
 
 @pytest.mark.unit
 def test_portfolio_hhi_bounds(policy, synthetic_prices):
-    scoring = score_factors(synthetic_prices, policy)
+    scoring = score_factors(synthetic_prices, policy, use_curated=False)
     weights = optimize_portfolio(scoring, synthetic_prices, policy)
     hhi = portfolio_hhi(weights)
     equal_weight_hhi = 1.0 / policy.num_positions
@@ -193,7 +193,7 @@ def test_portfolio_hhi_bounds(policy, synthetic_prices):
 @pytest.mark.unit
 def test_portfolio_volatility_nan_when_ticker_missing(policy, synthetic_prices):
     """If one target ticker has no price series, vol is NaN, not a lie."""
-    scoring = score_factors(synthetic_prices, policy)
+    scoring = score_factors(synthetic_prices, policy, use_curated=False)
     weights = optimize_portfolio(scoring, synthetic_prices, policy)
     # Rename one column in prices so the ticker is not found.
     prices_short = synthetic_prices.rename(columns={weights.index[0]: "ZZZ_MISSING"})

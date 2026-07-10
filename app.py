@@ -43,6 +43,10 @@ from src.portfolio.pipeline import (
     score_factors,
 )
 from src.portfolio.policy import DEFAULT_POLICY_PATH, load_policy
+from src.portfolio.proposal import (
+    ACTION_BUY, ACTION_EXTEND, ACTION_SELL,
+    propose_trades,
+)
 
 DEFAULT_PROCESSED_DIR = Path.home() / "trade_data" / "ETFTrader" / "processed"
 
@@ -56,6 +60,82 @@ st.set_page_config(
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
+)
+
+
+# ────────────────────────────────────────────────────────────────
+# Professional styling — tightens Streamlit's default look
+# ────────────────────────────────────────────────────────────────
+
+st.markdown(
+    """
+    <style>
+    /* Tighter overall spacing */
+    .block-container { padding-top: 1.5rem; padding-bottom: 3rem; max-width: 1400px; }
+
+    /* Section headers */
+    h1 { font-weight: 700; letter-spacing: -0.02em; margin-bottom: 0.3rem; }
+    h2 { font-weight: 650; letter-spacing: -0.01em; margin-top: 0.4rem; }
+    h3 { font-weight: 600; color: #1f2933; }
+
+    /* Sidebar */
+    section[data-testid="stSidebar"] { background-color: #fafbfc; }
+    section[data-testid="stSidebar"] h1,
+    section[data-testid="stSidebar"] h2,
+    section[data-testid="stSidebar"] h3 { color: #1f2933; }
+
+    /* Tabs — pill-style */
+    .stTabs [data-baseweb="tab-list"] { gap: 0.35rem; border-bottom: 1px solid #e4e7eb; }
+    .stTabs [data-baseweb="tab"] {
+        padding: 0.55rem 1.1rem;
+        border-radius: 6px 6px 0 0;
+        font-weight: 500;
+        color: #52606d;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #f0f4f8;
+        color: #102a43;
+        font-weight: 600;
+    }
+
+    /* Metrics — bigger, cleaner numbers */
+    [data-testid="stMetricValue"] {
+        font-size: 1.55rem;
+        font-weight: 700;
+        color: #102a43;
+    }
+    [data-testid="stMetricLabel"] {
+        font-size: 0.78rem;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+        color: #7b8794;
+        font-weight: 600;
+    }
+    [data-testid="stMetricDelta"] { font-size: 0.85rem; }
+
+    /* Buttons */
+    button[kind="primary"] {
+        background-color: #0967d2;
+        border: none;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+    }
+    button[kind="primary"]:hover { background-color: #0552b5; }
+
+    /* Info/warning/error boxes — softer */
+    div[data-baseweb="notification"] { border-radius: 6px; }
+
+    /* Dataframes — tighter rows */
+    [data-testid="stDataFrame"] { font-size: 0.88rem; }
+
+    /* Dividers */
+    hr { margin: 1.2rem 0; border-color: #e4e7eb; }
+
+    /* Caption cleanup */
+    [data-testid="stCaptionContainer"] { color: #7b8794; }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
 
@@ -558,7 +638,170 @@ with tab_propose:
         "held positions are never cancelled or rebased — Extends layer a new "
         "TRAIL covering only the new shares."
     )
-    st.button("Generate proposal", disabled=True, help="Wired in slice 4")
+
+    snap = st.session_state.get("ib_snapshot")
+    weights = st.session_state.get("target_weights")
+    scoring = st.session_state.get("scoring")
+    cash_budget = float(st.session_state.get("cash_budget") or 0.0)
+
+    if snap is None:
+        st.info("Pull the live snapshot in tab 1 first.")
+    elif weights is None:
+        st.info("Run the optimiser in tab 3 first.")
+    else:
+        c1, c2 = st.columns([1, 3])
+        with c1:
+            if st.button("Generate proposal", type="primary"):
+                with st.spinner("Comparing target to live positions…"):
+                    try:
+                        factor_scores = scoring.factor_scores if scoring is not None else None
+                        proposal = propose_trades(
+                            snapshot=snap,
+                            target_weights=weights,
+                            cash_budget=cash_budget,
+                            policy=policy,
+                            factor_scores=factor_scores,
+                        )
+                        st.session_state["proposed_trades"] = proposal
+                        st.session_state["explanation"] = None
+                        st.success(
+                            f"Proposal built — {len(proposal.trades)} trades, "
+                            f"turnover ${proposal.turnover_notional:,.0f} "
+                            f"({proposal.turnover_pct_of_nav:.1%} NAV)."
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(f"Proposal generation failed: {exc}")
+        with c2:
+            st.caption(
+                f"Comparing snapshot from {snap.timestamp:%Y-%m-%d %H:%M} "
+                f"against {len(weights)} target positions. "
+                f"Cash budget: **${cash_budget:,.0f}**. Cash reserve: "
+                f"**${policy.cash_reserve:,.0f}**."
+            )
+
+    proposal = st.session_state.get("proposed_trades")
+    if proposal is not None:
+        st.divider()
+
+        # ────────────────────────────────────────────────────────
+        # Headline metrics
+        # ────────────────────────────────────────────────────────
+        st.subheader("Proposal summary")
+
+        n_buys = sum(1 for t in proposal.trades if t.action == ACTION_BUY)
+        n_sells = sum(1 for t in proposal.trades if t.action == ACTION_SELL)
+        n_extends = sum(1 for t in proposal.trades if t.action == ACTION_EXTEND)
+
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        m1.metric("Trades", f"{len(proposal.trades)}")
+        m2.metric("Buy · Sell · Extend", f"{n_buys} · {n_sells} · {n_extends}")
+        m3.metric("Turnover", f"${proposal.turnover_notional:,.0f}",
+                  f"{proposal.turnover_pct_of_nav:.1%} of NAV")
+        m4.metric("Est. cost", f"${proposal.total_est_cost:,.0f}")
+        m5.metric("Positions after", f"{proposal.n_positions_after}",
+                  f"target {policy.num_positions}")
+        m6.metric("Cash after", f"${proposal.cash_after:,.0f}",
+                  f"reserve ${policy.cash_reserve:,.0f}")
+
+        # ────────────────────────────────────────────────────────
+        # Warnings
+        # ────────────────────────────────────────────────────────
+        if proposal.warnings:
+            with st.expander(f"⚠️ {len(proposal.warnings)} warning(s)",
+                             expanded=True):
+                for w in proposal.warnings:
+                    st.markdown(f"- {w}")
+
+        # ────────────────────────────────────────────────────────
+        # Blotter
+        # ────────────────────────────────────────────────────────
+        st.subheader("Blotter")
+
+        if not proposal.trades:
+            st.info(
+                "No trades proposed. Portfolio is inside drift thresholds "
+                "and the target basket matches current holdings. Nothing to do."
+            )
+        else:
+            blotter = pd.DataFrame([
+                {
+                    "Ticker": t.ticker,
+                    "Action": t.action,
+                    "Δ shares": t.delta_shares,
+                    "Current shares": t.current_shares,
+                    "Target shares": t.target_shares,
+                    "Price": t.market_price,
+                    "Notional": t.delta_notional,
+                    "Est. cost": t.est_cost,
+                    "Current %": t.current_weight_pct,
+                    "Target %": t.target_weight_pct,
+                    "Gap": t.weight_gap_pct,
+                }
+                for t in proposal.trades
+            ])
+            # Sort: SELL first, then EXTEND, then BUY; within each by notional desc.
+            action_order = {ACTION_SELL: 0, ACTION_EXTEND: 1, ACTION_BUY: 2}
+            blotter["_ord"] = blotter["Action"].map(action_order)
+            blotter = blotter.sort_values(
+                ["_ord", "Notional"], ascending=[True, False],
+            ).drop(columns="_ord").reset_index(drop=True)
+
+            st.dataframe(
+                blotter,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Ticker": st.column_config.TextColumn(width="small"),
+                    "Action": st.column_config.TextColumn(width="small"),
+                    "Δ shares": st.column_config.NumberColumn(format="%+d"),
+                    "Current shares": st.column_config.NumberColumn(format="%d"),
+                    "Target shares": st.column_config.NumberColumn(format="%d"),
+                    "Price": st.column_config.NumberColumn(format="$%.2f"),
+                    "Notional": st.column_config.NumberColumn(format="$%,.0f"),
+                    "Est. cost": st.column_config.NumberColumn(format="$%.2f"),
+                    "Current %": st.column_config.NumberColumn(format="%.2f%%"),
+                    "Target %": st.column_config.NumberColumn(format="%.2f%%"),
+                    "Gap": st.column_config.NumberColumn(format="%+.2f%%"),
+                },
+            )
+
+        # ────────────────────────────────────────────────────────
+        # Factor exposure delta
+        # ────────────────────────────────────────────────────────
+        if proposal.factor_exposures:
+            st.subheader("Factor exposure — before → after")
+            exp_df = pd.DataFrame([
+                {"Factor": f.factor.title(), "Before": f.before,
+                 "After": f.after, "Δ": f.delta}
+                for f in proposal.factor_exposures
+            ])
+            st.dataframe(
+                exp_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Factor": st.column_config.TextColumn(width="medium"),
+                    "Before": st.column_config.NumberColumn(format="%+.2f"),
+                    "After": st.column_config.NumberColumn(format="%+.2f"),
+                    "Δ": st.column_config.NumberColumn(format="%+.2f"),
+                },
+            )
+            st.caption(
+                "Dollar-weighted mean of the per-ticker factor scores across the "
+                "portfolio, before vs after this rebalance. Positive delta = "
+                "portfolio tilts further toward the factor."
+            )
+
+        # ────────────────────────────────────────────────────────
+        # Cash + investable summary
+        # ────────────────────────────────────────────────────────
+        st.divider()
+        st.caption(
+            f"NAV before: **${snap.nav:,.0f}** · "
+            f"Cash budget: **${cash_budget:,.0f}** · "
+            f"Cash reserve: **${policy.cash_reserve:,.0f}** · "
+            f"Investable NAV (target basket total): **${proposal.investable_nav:,.0f}**"
+        )
 
 
 with tab_explain:

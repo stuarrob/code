@@ -386,6 +386,7 @@ def score_factors(
     policy: SmartBetaPolicy,
     expense_ratios: Optional[pd.Series] = None,
     dividend_yields: Optional[pd.Series] = None,
+    use_curated: bool = True,
 ) -> ScoringResult:
     """Compute per-factor scores + weighted-geometric-mean integration.
 
@@ -418,8 +419,10 @@ def score_factors(
     # Full smart-beta universe screen: leverage/inverse + commodity + currency
     # + volatility products. Matches the operator's design intent stated
     # 2026-07-10. Diagnostic scripts must apply the same screen to be a
-    # fair simulation of live behaviour.
-    basic_tickers = filter_universe(all_tickers)
+    # fair simulation of live behaviour. Tests may pass `use_curated=False`
+    # to bypass the curated-list restriction when scoring synthetic tickers
+    # not on the hand-picked list.
+    basic_tickers = filter_universe(all_tickers, use_curated=use_curated)
     excluded = len(all_tickers) - len(basic_tickers)
     logger.info(
         "Universe: %d -> %d after smart-beta screen (%d dropped: "
