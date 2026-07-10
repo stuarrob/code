@@ -51,116 +51,108 @@ DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-7"  # highest quality; ~5x Sonnet cost,
 # ────────────────────────────────────────────────────────────────
 
 def narrate_proposal(proposal: TradeProposal,
-                     policy_name: Optional[str] = None) -> str:
-    """Compose a plain-English summary of the proposal, deterministically.
+                     policy_name: Optional[str] = None,
+                     metadata: Optional[dict] = None) -> str:
+    """Pithy plain-English summary. One headline, ≤ 6 bullets, no per-trade dump.
 
-    This is what a human reader sees on Step 5 when the LLM is not
-    configured or has been disabled. It is also the exact same text the
-    LLM receives as ground truth in its prompt.
+    Args:
+        proposal: the ground-truth blotter.
+        policy_name: optional label for the policy that produced it.
+        metadata: optional {ticker → TickerMetadata} from
+            `ticker_metadata.enrich_tickers`. When present, buys are
+            grouped by geography and the dominant factor is quoted.
+
+    Returns markdown. Designed to fit on one screen without scrolling.
     """
-    lines: list[str] = []
     n_trades = len(proposal.trades)
 
     if n_trades == 0:
-        lines.append(
-            "**No trades proposed.** The current portfolio is inside the "
-            "drift threshold and matches the target basket. There is "
-            "nothing to do this cycle."
-        )
+        text = ("**No trades proposed.** Portfolio is inside the drift "
+                "threshold and matches the target basket.")
         if proposal.warnings:
-            lines.append("")
-            lines.append("**Warnings:**")
-            for w in proposal.warnings:
-                lines.append(f"- {w}")
-        return "\n".join(lines)
+            text += "\n\n**Warnings:** " + "; ".join(proposal.warnings)
+        return text
 
-    # Buckets
     buys = [t for t in proposal.trades if t.action == ACTION_BUY]
     sells = [t for t in proposal.trades if t.action == ACTION_SELL]
     extends = [t for t in proposal.trades if t.action == ACTION_EXTEND]
 
-    lines.append(
-        f"**Headline.** {n_trades} trade{'s' if n_trades != 1 else ''} "
-        f"proposed — "
-        f"**{len(buys)} buy{'s' if len(buys) != 1 else ''}**, "
-        f"**{len(sells)} sell{'s' if len(sells) != 1 else ''}**, "
-        f"**{len(extends)} extend{'s' if len(extends) != 1 else ''}**. "
-        f"Total turnover **${proposal.turnover_notional:,.0f}** "
-        f"({proposal.turnover_pct_of_nav:.1%} of NAV). "
-        f"Estimated cost **${proposal.total_est_cost:,.0f}**. "
-        f"Portfolio ends with **{proposal.n_positions_after} positions**."
-    )
+    # 1. Headline — one line
+    lines = [
+        f"**{n_trades} trades: {len(buys)} buy · {len(sells)} sell · "
+        f"{len(extends)} extend.** "
+        f"Turnover **${proposal.turnover_notional:,.0f}** "
+        f"({proposal.turnover_pct_of_nav:.0%} NAV), cost "
+        f"**${proposal.total_est_cost:,.0f}** "
+        f"({proposal.total_est_cost / max(proposal.turnover_notional, 1) * 10_000:.1f} bps). "
+        f"Ends with **{proposal.n_positions_after}** positions."
+    ]
 
-    # Sells — clean out first
+    # 2. Buying into — grouped by geography if metadata provided
+    incoming = buys + extends
+    if incoming:
+        lines.append("")
+        if metadata:
+            by_geo: dict[str, float] = {}
+            for t in incoming:
+                m = metadata.get(t.ticker)
+                geo = m.geography if m and m.geography else "Unknown"
+                by_geo[geo] = by_geo.get(geo, 0.0) + t.delta_notional
+            top_geo = sorted(by_geo.items(), key=lambda kv: -kv[1])[:4]
+            geo_str = ", ".join(
+                f"{g} ${v/1000:.0f}k" for g, v in top_geo
+            )
+            lines.append(f"**Buying into:** {geo_str}.")
+        else:
+            top_buys = sorted(incoming, key=lambda x: -x.delta_notional)[:4]
+            lines.append(
+                f"**Top buys:** " +
+                ", ".join(
+                    f"{t.ticker} ${t.delta_notional/1000:.0f}k"
+                    for t in top_buys
+                ) + "."
+            )
+
+    # 3. Selling out of — top few
     if sells:
         lines.append("")
-        lines.append("**Sells** (reduce or exit; existing TRAILs on held positions are not touched by this proposal):")
-        for t in sorted(sells, key=lambda x: -x.delta_notional):
-            reason = "exit position" if t.target_shares == 0 else "reduce to target weight"
-            lines.append(
-                f"- **{t.ticker}** — sell {abs(t.delta_shares):,d} shares "
-                f"@ ${t.market_price:.2f} = ${t.delta_notional:,.0f}. "
-                f"{reason.capitalize()} ({t.current_weight_pct:.1%} → {t.target_weight_pct:.1%})."
+        top_sells = sorted(sells, key=lambda x: -x.delta_notional)[:4]
+        if metadata:
+            sell_str = ", ".join(
+                f"{t.ticker} ({metadata[t.ticker].geography or '?'}) "
+                f"${t.delta_notional/1000:.0f}k"
+                for t in top_sells if t.ticker in metadata
             )
-
-    # Extends — add to existing
-    if extends:
-        lines.append("")
-        lines.append("**Extends** (add to existing positions; a new trailing stop covering only the new shares will be attached):")
-        for t in sorted(extends, key=lambda x: -x.delta_notional):
-            lines.append(
-                f"- **{t.ticker}** — buy {t.delta_shares:,d} more shares "
-                f"@ ${t.market_price:.2f} = ${t.delta_notional:,.0f}. "
-                f"Weight moves from {t.current_weight_pct:.1%} → {t.target_weight_pct:.1%} "
-                f"(gap {t.weight_gap_pct:+.1%})."
+        else:
+            sell_str = ", ".join(
+                f"{t.ticker} ${t.delta_notional/1000:.0f}k" for t in top_sells
             )
+        lines.append(f"**Selling out of:** {sell_str}.")
 
-    # Buys — fresh positions
-    if buys:
-        lines.append("")
-        lines.append("**Buys** (fresh positions; each gets a full trailing stop):")
-        for t in sorted(buys, key=lambda x: -x.delta_notional):
-            lines.append(
-                f"- **{t.ticker}** — buy {t.delta_shares:,d} shares "
-                f"@ ${t.market_price:.2f} = ${t.delta_notional:,.0f}. "
-                f"New position at {t.target_weight_pct:.1%} of NAV."
-            )
-
-    # Factor tilt narrative
+    # 4. Factor tilt — one line, only significant deltas
     if proposal.factor_exposures:
-        tilts: list[str] = []
+        tilts = []
         for fe in proposal.factor_exposures:
-            if fe.before != fe.before or fe.after != fe.after:  # NaN guards
+            if fe.before != fe.before or fe.after != fe.after:
                 continue
             if abs(fe.delta) < 0.02:
                 continue
-            direction = "increases" if fe.delta > 0 else "decreases"
-            tilts.append(
-                f"**{fe.factor}** {direction} ({fe.before:+.2f} → {fe.after:+.2f}, "
-                f"Δ {fe.delta:+.2f})"
-            )
+            arrow = "↑" if fe.delta > 0 else "↓"
+            tilts.append(f"{fe.factor} {arrow} ({fe.delta:+.2f})")
         if tilts:
             lines.append("")
-            lines.append("**Factor tilt (before → after).** " + "; ".join(tilts) + ".")
+            lines.append(f"**Factor tilt:** {' · '.join(tilts)}.")
 
-    # Cash + warnings
+    # 5. Cash + warnings — one line each if present
     lines.append("")
     lines.append(
-        f"**Cash impact.** After settlement the account should hold "
-        f"about **${proposal.cash_after:,.0f}** in cash "
-        f"(policy reserve is included in the target math)."
+        f"**Cash after:** ${proposal.cash_after:,.0f} "
+        f"(reserve target: policy-set)."
     )
-
     if proposal.warnings:
         lines.append("")
-        lines.append(f"**{len(proposal.warnings)} warning(s) — review before Applying:**")
-        for w in proposal.warnings:
-            lines.append(f"- {w}")
-
-    if policy_name:
-        lines.append("")
-        lines.append(f"*Policy: `{policy_name}`. This narration is deterministic; "
-                     f"nothing here proposes a trade the code did not already decide.*")
+        lines.append(f"**⚠ {len(proposal.warnings)} warning(s).** "
+                     f"First: {proposal.warnings[0]}")
 
     return "\n".join(lines)
 
@@ -196,36 +188,25 @@ def _proposal_to_dict(proposal: TradeProposal) -> dict:
     }
 
 
-_SYSTEM_PROMPT = """You are the narrator for a deterministic ETF smart-beta trading applet.
+_SYSTEM_PROMPT = """You are the narrator for a deterministic ETF smart-beta trading applet operated against a live account.
 
-STRICT RULES — violating any of these breaks the app's safety contract:
+STRICT LENGTH: ≤ 4 short paragraphs, ≤ 200 words total. The operator reads this on-screen at rebalance time. Longer is worse.
 
-1. You never propose trades. The trades in the TradeProposal are decided by
-   a deterministic pipeline (`src/portfolio/proposal.py`) and are the sole
-   source of truth. Your job is to explain WHY they make sense given the
-   strategy's factor tilts and the current portfolio state.
+STRUCTURE the initial narration as:
+  1) One sentence — WHAT the portfolio is moving into (geography / asset-class shift).
+  2) One sentence — WHY, via the factor tilt (which factors drove the picks).
+  3) One sentence — cost + turnover in bps.
+  4) One sentence — anything the operator should scrutinise (warnings, cash impact, unusual concentration). Skip if nothing.
 
-2. You never invent numbers. If a number is not in the TradeProposal or the
-   deterministic-narration text you receive, do not include it. Quote the
-   proposal verbatim when precision matters.
+For Q&A: answer in ≤ 3 sentences unless the question genuinely needs more.
 
-3. If asked "what if" questions (e.g. "what if I increased my cash budget?"),
-   answer conceptually — do NOT compute new trades. Refer the operator back
-   to Steps 1-4 with the new inputs.
+STRICT SAFETY:
+- Never invent trades or numbers. The TradeProposal is ground truth. Quote it verbatim when precision matters.
+- Never compute "what if" scenarios. Refer the operator back to Steps 1–4 with new inputs.
+- If a fact isn't in the proposal, say "not shown in the proposal".
 
-4. Keep the language clean and precise. Retail-quality "market wisdom" is
-   worse than none. The reader is a serious operator with real money on the
-   line.
-
-5. When you receive a question about a specific trade, use the ticker as
-   the primary key. State the action (BUY / SELL / EXTEND), the size, and
-   ONE reason (usually a factor tilt or a target-weight gap).
-
-6. The strategy is 35% momentum, 30% quality, 20% low-volatility, 15% value.
-   All positions are chosen by weighted-geometric-mean rank on those factors.
-   Position sizing uses exponential rank weights, bounded 2%-15%. Trailing
-   stops are 10%. This is background you may reference; do not restate the
-   whole strategy every response."""
+Strategy context you may reference (do not restate):
+35% momentum · 30% quality · 20% low-vol · 15% value (yield + expense-ratio blend). Weighted geometric mean of factor ranks. Top-30, exponential rank weights, 2–15% bounds, 10% trailing stops. Rebalance bimonthly with 5% drift threshold. Universe is 599-ticker curated smart-beta list (no leverage, inverse, commodity, currency, vol products)."""
 
 
 def narrate_with_claude(

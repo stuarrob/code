@@ -61,32 +61,32 @@ class TestNarrateProposal:
         assert "No trades" in text
         assert "cash reserve breached" in text
 
-    def test_single_buy_mentions_ticker_and_action(self):
+    def test_single_buy_mentions_ticker(self):
         p = _proposal(trades=(_t("SPY", ACTION_BUY, 100),), turnover=10_000)
         text = narrate_proposal(p)
         assert "SPY" in text
-        assert "Buys" in text
+        # Pithy narrator: buys appear under "Top buys" (no metadata) or "Buying into" (with metadata)
+        assert "Top buys" in text or "Buying into" in text
         assert "$10,000" in text  # turnover formatting
 
-    def test_sell_shows_exit_language(self):
+    def test_sell_ticker_appears(self):
         p = _proposal(trades=(_t("XLK", ACTION_SELL, -50, target_shares=0,
                                    current_shares=50, current_pct=0.05,
                                    target_pct=0.0),))
         text = narrate_proposal(p)
         assert "XLK" in text
-        assert "Sells" in text
-        assert "Exit position" in text or "exit position" in text.lower()
+        assert "Selling out of" in text
 
-    def test_extend_shows_current_and_target_pct(self):
+    def test_extend_ticker_appears(self):
         p = _proposal(trades=(_t("VTI", ACTION_EXTEND, 25,
                                    current_shares=100, target_shares=125,
                                    current_pct=0.10, target_pct=0.125),))
         text = narrate_proposal(p)
         assert "VTI" in text
-        assert "10.0%" in text
-        assert "12.5%" in text
+        # Extends are surfaced in "Top buys" bucket (buys + extends together)
+        assert "Top buys" in text or "Buying into" in text
 
-    def test_ordering_is_sells_extends_buys(self):
+    def test_all_action_kinds_are_named(self):
         trades = (
             _t("QQQ", ACTION_BUY, 10),
             _t("SPY", ACTION_SELL, -5, current_shares=5, target_shares=0),
@@ -94,10 +94,10 @@ class TestNarrateProposal:
         )
         p = _proposal(trades=trades)
         text = narrate_proposal(p)
-        sells_idx = text.find("Sells")
-        extends_idx = text.find("Extends")
-        buys_idx = text.find("Buys")
-        assert 0 <= sells_idx < extends_idx < buys_idx
+        # Headline counts each action type
+        assert "1 buy" in text
+        assert "1 sell" in text
+        assert "1 extend" in text
 
     def test_factor_exposures_included_when_significant(self):
         p = _proposal(
@@ -109,9 +109,9 @@ class TestNarrateProposal:
         )
         text = narrate_proposal(p)
         assert "momentum" in text
-        assert "increases" in text
+        # Pithy narrator uses arrow, not "increases"
+        assert "↑" in text
         # Quality delta 0.0 → below the 0.02 threshold → not mentioned in tilt
-        # (may still appear in trade listings but not the tilt narrative)
 
     def test_factor_exposure_nan_skipped(self):
         p = _proposal(
@@ -139,6 +139,7 @@ class TestNarrateProposal:
             warnings=("XYZ: no market price", "cash reserve breached"),
         )
         text = narrate_proposal(p)
+        # Pithy narrator: shows warning count + first warning only.
         assert "warning" in text.lower()
-        assert "no market price" in text
-        assert "cash reserve" in text
+        assert "2 warning" in text
+        assert "no market price" in text  # first warning verbatim

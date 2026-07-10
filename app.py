@@ -54,6 +54,7 @@ from src.portfolio.explain import (
     narrate_with_claude,
 )
 from src.data_collection.issuer_fundamentals import load_fundamentals_series
+from src.data_collection.ticker_metadata import enrich_tickers
 
 DEFAULT_PROCESSED_DIR = Path.home() / "trade_data" / "ETFTrader" / "processed"
 
@@ -785,6 +786,89 @@ with tab_propose:
             )
 
         # ────────────────────────────────────────────────────────
+        # Composition — what am I buying, where, why
+        # ────────────────────────────────────────────────────────
+        incoming_tickers = [
+            t.ticker for t in proposal.trades
+            if t.action in (ACTION_BUY, ACTION_EXTEND)
+        ]
+        outgoing_tickers = [
+            t.ticker for t in proposal.trades
+            if t.action == ACTION_SELL
+        ]
+        metadata_map = {}
+        if incoming_tickers or outgoing_tickers:
+            factor_scores_df = scoring.factor_scores if scoring is not None else None
+            metadata_map = enrich_tickers(
+                list(set(incoming_tickers + outgoing_tickers)),
+                factor_scores=factor_scores_df,
+            )
+            # Persist for Step 5 narrator.
+            st.session_state["metadata_map"] = metadata_map
+
+        if incoming_tickers:
+            st.subheader("Buying into")
+
+            comp_rows = []
+            for tr in proposal.trades:
+                if tr.action not in (ACTION_BUY, ACTION_EXTEND):
+                    continue
+                m = metadata_map.get(tr.ticker)
+                comp_rows.append({
+                    "Ticker": tr.ticker,
+                    "Name": (m.name if m and m.name else "—"),
+                    "Geography": (m.geography if m else "—"),
+                    "Asset class": (m.asset_class if m else "—"),
+                    "Category": (m.category if m else "—"),
+                    "Dominant factor": (
+                        f"{m.dominant_factor} ({m.dominant_factor_score:+.2f})"
+                        if m and m.dominant_factor and m.dominant_factor_score is not None
+                        else "—"
+                    ),
+                    "Action": tr.action,
+                    "Notional": tr.delta_notional,
+                })
+            comp_df = pd.DataFrame(comp_rows).sort_values("Notional", ascending=False)
+            st.dataframe(
+                comp_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Notional": st.column_config.NumberColumn(format="$%,.0f"),
+                },
+            )
+
+            # Rollup by geography
+            r1, r2 = st.columns(2)
+            geo_group = comp_df.groupby("Geography")["Notional"].sum().sort_values(
+                ascending=False,
+            )
+            with r1:
+                st.markdown("**Notional by geography**")
+                st.dataframe(
+                    geo_group.reset_index().rename(columns={"Notional": "Buy notional"}),
+                    hide_index=True,
+                    column_config={
+                        "Buy notional": st.column_config.NumberColumn(format="$%,.0f"),
+                    },
+                )
+
+            factor_group = comp_df.groupby("Dominant factor")["Notional"].sum().sort_values(
+                ascending=False,
+            )
+            with r2:
+                st.markdown("**Notional by dominant factor**")
+                st.dataframe(
+                    factor_group.reset_index().rename(
+                        columns={"Notional": "Buy notional"}
+                    ),
+                    hide_index=True,
+                    column_config={
+                        "Buy notional": st.column_config.NumberColumn(format="$%,.0f"),
+                    },
+                )
+
+        # ────────────────────────────────────────────────────────
         # Factor exposure delta
         # ────────────────────────────────────────────────────────
         if proposal.factor_exposures:
@@ -841,7 +925,10 @@ with tab_explain:
         # ────────────────────────────────────────────────────
         # Deterministic narration — always available
         # ────────────────────────────────────────────────────
-        deterministic = narrate_proposal(proposal, policy_name=policy.name)
+        metadata_map = st.session_state.get("metadata_map") or {}
+        deterministic = narrate_proposal(
+            proposal, policy_name=policy.name, metadata=metadata_map,
+        )
         st.subheader("Deterministic summary")
         st.markdown(deterministic)
 
