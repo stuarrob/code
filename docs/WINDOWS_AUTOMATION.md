@@ -213,6 +213,53 @@ The count should be roughly the number of stale + missing tickers as of
 last night — anywhere from a handful (steady state) to thousands (catch-up
 mode after downtime).
 
+## Weekly FMP refresh (fundamentals + SPY + VIX + price top-up)
+
+Runs alongside the nightly IB collector. Uses Financial Modeling Prep
+(Premium tier — verified 2026-07-10) for:
+
+- ETF fundamentals (yield + expense ratio + AUM, ~5000 tickers)
+- SPY + VIX daily-close series (for the regime overlay)
+- Price top-up for any ETFs where FMP has newer data than the IB cache
+
+Wrapper: [scripts/weekly_fmp_refresh_windows.cmd](../scripts/weekly_fmp_refresh_windows.cmd).
+Sends a Telegram start notice and an end summary via
+[scripts/telegram_send.py](../scripts/telegram_send.py) (reads
+`TELEGRAM_TOKEN` + `TELEGRAM_CHAT_ID` from `.env`).
+
+Runtime: ~15–20 minutes steady-state (mostly fundamentals refresh + FMP
+top-up for any newly-added universe members). First-run backfill (2010
+onwards) is a one-off ~15 minute job — do that manually before
+scheduling the weekly job.
+
+### Installing the weekly schedule (one PowerShell command)
+
+Runs Saturday 20:00 local (feel free to change). No admin required —
+uses user-scope Task Scheduler. Replace `stuar` with the actual username
+if this doc is being reused.
+
+```powershell
+schtasks /Create `
+  /TN "ETFTrader\Weekly FMP Refresh" `
+  /TR "C:\Users\stuar\code\ETFTrader\scripts\weekly_fmp_refresh_windows.cmd" `
+  /SC WEEKLY /D SAT /ST 20:00 `
+  /RL LIMITED /F
+```
+
+Verify installation:
+
+```powershell
+schtasks /Query /TN "ETFTrader\Weekly FMP Refresh" /V /FO LIST
+```
+
+Test-run once manually to confirm the Telegram notifications land and
+the log gets written:
+
+```powershell
+& "C:\Users\stuar\code\ETFTrader\scripts\weekly_fmp_refresh_windows.cmd"
+Get-Content "C:\Users\stuar\trade_data\ETFTrader\logs\weekly_fmp_refresh.log" -Tail 40
+```
+
 ## Troubleshooting
 
 **Gateway launches but IBC never enters credentials.** Usually a 2FA
