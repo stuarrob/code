@@ -167,19 +167,48 @@ def _merge(existing: Optional[pd.DataFrame], fmp: pd.DataFrame) -> pd.DataFrame:
 
 def _process_ticker(ticker: str, api_key: str, from_date: str,
                     delay_sec: float, dry_run: bool) -> dict:
-    """Handle one ticker. Returns a small stats dict for the summary."""
-    existing = _load_existing(ticker)
-    existing_start = existing.index.min() if existing is not None and len(existing) > 0 else None
-    existing_rows = len(existing) if existing is not None else 0
+    """Handle one ticker. Returns a small stats dict for the summary.
 
-    # Skip if already deep enough.
-    if existing_start is not None and existing_start <= pd.Timestamp("2010-06-30"):
-        return {"ticker": ticker, "action": "skip-already-deep",
+    Two possible actions per ticker:
+      (a) Deepen: if the cache doesn't reach 2010, fetch full history.
+      (b) Top-up: if the cache is deep enough but ends more than a
+          trading day ago, fetch only the tail since the last cached
+          date. This is the common weekly-refresh path.
+      Skip when both are current.
+    """
+    existing = _load_existing(ticker)
+    if existing is None or len(existing) == 0:
+        existing_start = None
+        existing_end = None
+        existing_rows = 0
+    else:
+        existing_start = existing.index.min()
+        existing_end = existing.index.max()
+        existing_rows = len(existing)
+
+    today = pd.Timestamp.today().normalize()
+    is_deep = existing_start is not None and existing_start <= pd.Timestamp("2010-06-30")
+    is_current = existing_end is not None and (today - existing_end).days <= 1
+
+    # Skip if the tail is current, regardless of how deep the cache goes.
+    # Deepening pre-2010 is a separate concern from daily top-up: newer
+    # ETFs simply don't have pre-inception history to fetch, and re-asking
+    # FMP every run wastes 100% of the requests. If the operator wants to
+    # force a deepen attempt, they can delete the ticker's parquet.
+    if is_current:
+        return {"ticker": ticker, "action": "skip-already-current",
                 "existing_rows": existing_rows}
 
-    fmp = _fetch_fmp(ticker, api_key, from_date, delay_sec)
+    # Cache is stale. If we have any history at all, fetch just the tail;
+    # otherwise fetch from the configured from_date.
+    fetch_from = from_date
+    if existing_end is not None:
+        fetch_from = (existing_end + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+    fmp = _fetch_fmp(ticker, api_key, fetch_from, delay_sec)
     if fmp is None or len(fmp) == 0:
-        return {"ticker": ticker, "action": "fail-no-fmp-data",
+        return {"ticker": ticker,
+                "action": "skip-no-new-fmp-data" if is_deep else "fail-no-fmp-data",
                 "existing_rows": existing_rows}
 
     merged = _merge(existing, fmp)

@@ -319,6 +319,81 @@ def refresh_prices_from_ib(
     )
 
 
+def rebuild_price_matrix(
+    cache_dir: Path = DEFAULT_IB_CACHE_DIR,
+    out_path: Optional[Path] = None,
+    progress_callback=None,
+) -> dict:
+    """Rebuild the wide processed price matrix from the per-ticker cache.
+
+    Root cause this fixes (2026-08-28): the FMP refresh tops up the
+    per-ticker parquets under ``cache_dir``, but the pipeline reads the
+    PROCESSED wide matrix (``etf_prices_ib.parquet``), which only the
+    nightly IB collector rebuilds. When that cron fails for weeks the
+    applet silently scores factors and prices proposals on stale data
+    (six weeks stale on 2026-08-28). This function closes the gap:
+    call it after any refresh so the matrix the model consumes matches
+    the per-ticker cache.
+
+    Args:
+        cache_dir: directory of per-ticker ``{TICKER}.parquet`` files.
+        out_path: matrix parquet to write. Defaults to
+            ``<processed>/etf_prices_ib.parquet``.
+        progress_callback: optional ``fn(done, total)`` for UI progress.
+
+    Returns:
+        Summary dict: n_tickers, n_days, start, end, out_path.
+    """
+    from src.data_collection.comprehensive_etf_list import load_full_universe
+
+    cache_dir = Path(cache_dir)
+    if out_path is None:
+        out_path = DEFAULT_PROCESSED_DIR / "etf_prices_ib.parquet"
+    out_path = Path(out_path)
+
+    tickers, _ = load_full_universe()
+    series: dict[str, pd.Series] = {}
+    total = len(tickers)
+    for i, t in enumerate(tickers):
+        if progress_callback and i % 200 == 0:
+            progress_callback(i, total)
+        p = cache_dir / f"{t}.parquet"
+        if not p.exists():
+            continue
+        try:
+            df = pd.read_parquet(p, columns=["close"])
+        except Exception:  # noqa: BLE001 — unreadable ticker ≈ skip
+            continue
+        if df.empty:
+            continue
+        s = df["close"].dropna()
+        if s.empty:
+            continue
+        s.index = pd.to_datetime(s.index)
+        series[t] = s[~s.index.duplicated(keep="last")]
+    if progress_callback:
+        progress_callback(total, total)
+
+    if not series:
+        raise ValueError(f"No usable per-ticker parquets under {cache_dir}")
+
+    matrix = pd.DataFrame(series).sort_index()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    matrix.to_parquet(out_path)
+    logger.info(
+        "Rebuilt price matrix: %d tickers x %d days (%s to %s) -> %s",
+        matrix.shape[1], matrix.shape[0],
+        matrix.index.min().date(), matrix.index.max().date(), out_path,
+    )
+    return {
+        "n_tickers": int(matrix.shape[1]),
+        "n_days": int(matrix.shape[0]),
+        "start": matrix.index.min(),
+        "end": matrix.index.max(),
+        "out_path": str(out_path),
+    }
+
+
 def _resolve_cached_prices(processed_dir: Path) -> Path:
     """Return whichever cached parquet has the newest last bar.
 

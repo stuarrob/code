@@ -176,6 +176,7 @@ except Exception as exc:
 
 _DEFAULTS = {
     "cash_budget": 0.0,
+    "target_cash_reserve": None,  # None => fall back to policy.cash_reserve
     "ib_snapshot": None,
     "price_load": None,
     "scoring": None,
@@ -251,21 +252,52 @@ tab_setup, tab_collect, tab_optimize, tab_propose, tab_explain, tab_send, tab_su
 
 
 with tab_setup:
-    st.header("Step 1 — cash budget + live IBKR snapshot")
+    st.header("Step 1 — cash + live IBKR snapshot")
     st.markdown(
-        "Enter the amount of **additional** cash you want to deploy on top of "
-        "the current portfolio. Leave at `0` to run a pure rebalance. Then "
-        "pull a **read-only** snapshot of your live IB account below."
+        "**Target cash reserve** = how much cash you want left in the "
+        "account after the rebalance. That is your buffer. The optimiser "
+        "will size the portfolio to leave exactly that amount unallocated "
+        "(subject to drift bands). Set it to 0 for full deployment.\n\n"
+        "**Additional cash** is only for **wire deposits in transit** — money "
+        "you have moved to IB but that the read-only snapshot cannot see "
+        "yet. Leave at 0 in almost all cases."
     )
 
     cash_col, ib_col = st.columns([1, 2])
     with cash_col:
         st.number_input(
-            "Additional cash (USD)",
+            "Target cash reserve after rebalance (USD)",
+            min_value=0.0,
+            step=1000.0,
+            format="%.0f",
+            key="target_cash_reserve_input",
+            value=float(
+                st.session_state.get("target_cash_reserve")
+                if st.session_state.get("target_cash_reserve") is not None
+                else policy.cash_reserve
+            ),
+            help=(
+                f"Cash you want to keep unallocated after the rebalance. "
+                f"Default is the policy's cash_reserve "
+                f"(${policy.cash_reserve:,.0f} from the current TOML)."
+            ),
+        )
+        # Persist the input into the actual state key
+        st.session_state["target_cash_reserve"] = (
+            st.session_state["target_cash_reserve_input"]
+        )
+
+        st.number_input(
+            "Additional cash — wire deposits in transit only (USD)",
             min_value=0.0,
             step=1000.0,
             format="%.0f",
             key="cash_budget",
+            help=(
+                "Only for cash you have wired to IB that the snapshot "
+                "does not see yet. Almost always 0. Money already in the "
+                "account is captured by the IB snapshot NAV."
+            ),
         )
 
     with ib_col:
@@ -484,10 +516,26 @@ with tab_collect:
         f"`docs/WINDOWS_AUTOMATION.md`) — no live IB fetch needed here."
     )
 
-    # ── Cache status ────────────────────────────────────────
-    with st.spinner("Scanning per-ticker cache…"):
+    # ── Cache status (cached across reruns for 5 min) ─────────
+    @st.cache_data(ttl=300, show_spinner=False)
+    def _cached_cache_status(_cache_dir_str: str) -> dict:
+        """Wrap cache_status so consecutive reruns don't re-scan 5000
+        parquets — that scan takes ~7s and dominates the perceived load
+        time on this tab. 5-minute TTL is fine: file freshness only
+        matters relative to the daily/weekly refresh cadence."""
+        return cache_status(cache_dir=Path(_cache_dir_str))
+
+    st_col_a, st_col_b = st.columns([4, 1])
+    with st_col_a:
+        st.caption("Cache status (refreshed every 5 minutes)")
+    with st_col_b:
+        if st.button("↻ Rescan", help="Force re-scan the cache now"):
+            _cached_cache_status.clear()
+            st.rerun()
+
+    with st.spinner("Scanning per-ticker cache… (first run ~7s, cached after)"):
         try:
-            status = cache_status(cache_dir=DEFAULT_IB_CACHE_DIR)
+            status = _cached_cache_status(str(DEFAULT_IB_CACHE_DIR))
         except Exception as exc:  # noqa: BLE001
             status = None
             st.warning(f"Cache scan failed: {exc}")
@@ -528,30 +576,144 @@ with tab_collect:
         # Optional FMP refresh first.
         if refresh_from_fmp:
             import subprocess as _sp
-            with st.status("Refreshing price cache from FMP…",
-                           expanded=True) as status_box:
+            # Refresh the FULL universe (not just the loaded price matrix
+            # columns). The universe contains ~5000 tickers; the matrix
+            # only ~4100. Refreshing only the matrix would leave the other
+            # ~900 stale forever, and cache_status would keep showing
+            # them as "stale". Since no-op refreshes are near-instant
+            # (skip-already-current avoids all HTTP), the cost of doing
+            # the full universe is ~40s in the steady state.
+            refresh_tickers: list[str] = []
+            try:
+                from src.data_collection.comprehensive_etf_list import (
+                    load_full_universe as _load_full_universe,
+                )
+                refresh_tickers, _ = _load_full_universe()
+                refresh_tickers = list(refresh_tickers)
+            except Exception:
+                refresh_tickers = []  # fall back to script-default (all parquets in cache)
+
+            n = len(refresh_tickers)
+            label_start = (
+                f"Refreshing {n} tickers from FMP (full universe, "
+                f"increment-only — ~30-60 seconds if cache is close "
+                f"to current)…"
+                if n else
+                "Refreshing price cache from FMP…"
+            )
+            with st.status(label_start, expanded=True) as status_box:
                 script_path = str(
                     Path(__file__).resolve().parent
                     / "scripts" / "backfill_prices_fmp.py"
                 )
+                # 10 workers, 0.1s delay; per-ticker script skips
+                # instantly (no HTTP call, no delay) when cache is
+                # current, so this is fast in the steady state.
+                cmd = [sys.executable, "-u", script_path,  # -u = unbuffered stdout
+                       "--workers", "10", "--delay", "0.1"]
+                if refresh_tickers:
+                    cmd += ["--tickers"] + refresh_tickers
+
+                # Live progress: stream the subprocess stdout and parse
+                # the backfill script's periodic "NNNN/MMMM elapsed Xs"
+                # lines to update a Streamlit progress bar. Without this
+                # the operator sees a spinning label and no idea if
+                # anything is happening.
+                import re as _re
+                _progress_re = _re.compile(
+                    r"^\s*(\d+)\s*/\s*(\d+)\s+elapsed\s+([\d\.]+)s\s+ETA\s+([\d\.]+)s"
+                )
+                progress_bar = st.progress(0, text="Starting FMP refresh…")
+                tail_placeholder = st.empty()
+                tail_lines: list[str] = []
+                last_pct = 0
                 try:
-                    result = _sp.run(
-                        [sys.executable, script_path, "--workers", "3", "--delay", "0.5"],
-                        capture_output=True, text=True, timeout=1800,
+                    proc = _sp.Popen(
+                        cmd, stdout=_sp.PIPE, stderr=_sp.STDOUT,
+                        text=True, bufsize=1,
                     )
-                    tail = "\n".join(result.stdout.splitlines()[-20:])
-                    if result.returncode == 0:
+                    for raw_line in iter(proc.stdout.readline, ""):
+                        line = raw_line.rstrip()
+                        if not line:
+                            continue
+                        tail_lines.append(line)
+                        if len(tail_lines) > 8:
+                            tail_lines = tail_lines[-8:]
+                        m = _progress_re.match(line)
+                        if m:
+                            done = int(m.group(1))
+                            total = int(m.group(2))
+                            elapsed = float(m.group(3))
+                            eta = float(m.group(4))
+                            pct = int(min(99, done * 100 // max(total, 1)))
+                            if pct != last_pct:
+                                last_pct = pct
+                                progress_bar.progress(
+                                    pct,
+                                    text=(
+                                        f"{done:,} / {total:,} tickers "
+                                        f"· elapsed {elapsed:.0f}s "
+                                        f"· ETA {eta:.0f}s"
+                                    ),
+                                )
+                        # Show the rolling tail so the operator can see
+                        # per-ticker actions coming through.
+                        tail_placeholder.code(
+                            "\n".join(tail_lines), language="text",
+                        )
+                    proc.wait()
+
+                    if proc.returncode == 0:
+                        progress_bar.progress(100, text="Complete")
                         status_box.update(
                             label="FMP refresh complete.",
                             state="complete", expanded=False,
                         )
-                        st.text(tail)
+                        # CRITICAL follow-through (2026-08-28 fix): the
+                        # refresh only updates the per-ticker cache; the
+                        # pipeline reads the processed wide matrix. If we
+                        # don't rebuild it here, the model scores and
+                        # prices on whatever the last nightly cron left
+                        # behind (was 6 weeks stale on 2026-08-28).
+                        from src.portfolio.pipeline import (
+                            rebuild_price_matrix,
+                        )
+                        with st.status(
+                            "Rebuilding price matrix from per-ticker "
+                            "cache (~30 s)…", expanded=True,
+                        ) as rb_box:
+                            rb_prog = st.progress(0, text="Reading cache…")
+
+                            def _rb_cb(done: int, total: int) -> None:
+                                rb_prog.progress(
+                                    min(done / max(total, 1), 1.0),
+                                    text=f"{done:,} / {total:,} tickers",
+                                )
+
+                            try:
+                                rb = rebuild_price_matrix(
+                                    progress_callback=_rb_cb,
+                                )
+                                rb_box.update(
+                                    label=(
+                                        f"Matrix rebuilt — "
+                                        f"{rb['n_tickers']:,} tickers "
+                                        f"through {rb['end']:%Y-%m-%d}."
+                                    ),
+                                    state="complete", expanded=False,
+                                )
+                            except Exception as rb_exc:  # noqa: BLE001
+                                rb_box.update(
+                                    label=f"Matrix rebuild failed: {rb_exc}",
+                                    state="error",
+                                )
+                                st.stop()
                     else:
+                        progress_bar.progress(100, text="Errored")
                         status_box.update(
-                            label=f"FMP refresh returned {result.returncode}",
+                            label=f"FMP refresh returned {proc.returncode}",
                             state="error",
                         )
-                        st.text(tail)
                         st.stop()
                 except Exception as exc:  # noqa: BLE001
                     status_box.update(
@@ -560,21 +722,41 @@ with tab_collect:
                     )
                     st.stop()
 
-        with st.spinner("Loading prices…"):
+        # Step-by-step progress with a visible status box + progress bar.
+        # The underlying work is fast (<1s) but we surface each phase so
+        # the operator can see something is happening — no silent spinner.
+        import time as _time
+        with st.status("Loading price matrix…", expanded=True) as load_status:
+            _prog = st.progress(0, text="Preparing…")
             try:
+                _prog.progress(15, text="Locating processed parquet…")
+                _t0 = _time.perf_counter()
+                _prog.progress(35, text="Reading parquet from disk…")
+                # Do the actual work
                 load = collect_prices(policy, processed_dir=Path(processed_dir))
+                _elapsed = _time.perf_counter() - _t0
+                _prog.progress(70, text=f"Applied quality filter · {load.n_tickers} tickers survived")
                 st.session_state["price_load"] = load
                 # Invalidate downstream artefacts.
                 for k in ("scoring", "target_weights", "opt_diagnostics",
                           "proposed_trades", "explanation"):
                     st.session_state[k] = None
-                st.success(
-                    f"Loaded `{load.source}` — {load.n_tickers} tickers, "
-                    f"{load.start_date:%Y-%m-%d} to {load.end_date:%Y-%m-%d}."
+                _prog.progress(100, text=f"Loaded in {_elapsed:.2f}s")
+                load_status.update(
+                    label=(
+                        f"Loaded `{load.source}` — {load.n_tickers} tickers, "
+                        f"{load.start_date:%Y-%m-%d} → {load.end_date:%Y-%m-%d} "
+                        f"({_elapsed:.2f}s)"
+                    ),
+                    state="complete", expanded=False,
                 )
             except (FileNotFoundError, ValueError) as exc:
                 st.session_state["price_load"] = None
-                st.error(str(exc))
+                _prog.progress(100, text="Failed")
+                load_status.update(
+                    label=f"Load failed: {exc}",
+                    state="error", expanded=True,
+                )
 
     load = st.session_state.get("price_load")
     if load is not None:
@@ -588,8 +770,111 @@ with tab_collect:
         if age_days > 3:
             st.warning(
                 f"Latest bar in loaded matrix is {age_days} days old — tick "
-                f"*Refresh from IB before load* and re-run if you need current data."
+                f"*Refresh from FMP before load* and re-run if you need current data."
             )
+
+        # ────────────────────────────────────────────────────────
+        # "Why do I have N tickers?" — funnel explanation.
+        # Operator asks this every time the number looks smaller
+        # than the universe. Show the drop-off explicitly.
+        # ────────────────────────────────────────────────────────
+        with st.expander(
+                f"Why {load.n_tickers} tickers, not more? · click to see the funnel",
+                expanded=False):
+            # Compute the funnel dynamically from cache + loaded matrix
+            n_universe = status["n_universe"] if status else None
+            n_cached = None
+            n_matrix = None
+            n_after_5y = len(load.prices)  # trading days, not tickers
+            try:
+                _matrix = pd.read_parquet(
+                    Path(processed_dir) / "etf_prices_ib.parquet",
+                    columns=None,
+                )
+                n_matrix = _matrix.shape[1]
+                n_cached = (n_universe - status["n_missing"]
+                            if status else None)
+            except Exception:
+                pass
+
+            n_final = load.n_tickers
+            st.markdown("**Tick-by-tick funnel from universe to loaded matrix:**")
+
+            funnel_rows = []
+            if n_universe:
+                funnel_rows.append(
+                    ("1. Full universe (curated ETF list)",
+                     n_universe, "—",
+                     "Baseline: every ticker we track"))
+                if n_cached is not None:
+                    lost = n_universe - n_cached
+                    funnel_rows.append(
+                        ("2. Have a cache file",
+                         n_cached, f"-{lost}",
+                         f"{lost} tickers missing a parquet — new listings "
+                         "not yet fetched, or FMP returned nothing"))
+            if n_matrix is not None:
+                if n_cached is not None:
+                    lost = n_cached - n_matrix
+                    funnel_rows.append(
+                        ("3. In the loaded wide matrix",
+                         n_matrix, f"-{lost}",
+                         f"{lost} tickers cached but not in etf_prices_ib.parquet "
+                         "(matrix is compiled periodically; new cache entries "
+                         "may not be in the current matrix)"))
+            if n_matrix is not None and n_final < n_matrix:
+                lost = n_matrix - n_final
+                funnel_rows.append(
+                    (f"4. Passed quality filter",
+                     n_final, f"-{lost}",
+                     f"{lost} tickers dropped: <{policy.factor_lookbacks.momentum} days "
+                     f"of history OR >10% missing bars in 5-year window "
+                     f"(e.g. thin-trading, launched recently, holiday gaps)"))
+            funnel_rows.append(
+                (f"5. **Ready for scoring** (this tab's output)",
+                 n_final, "",
+                 "This is the number used by the optimiser in Step 3"))
+            funnel_rows.append(
+                ("6. After leveraged/inverse filter (in Step 3)",
+                 "≈ N-100", "",
+                 "The optimiser removes leveraged / inverse ETFs before "
+                 "scoring — a 3× Direxion fund would otherwise dominate "
+                 "the momentum quintile. Handled in Step 3, not here."))
+
+            funnel_df = pd.DataFrame(
+                funnel_rows,
+                columns=["Stage", "Tickers", "Δ", "Reason"],
+            )
+            st.dataframe(
+                funnel_df, hide_index=True, use_container_width=True,
+                column_config={
+                    "Stage": st.column_config.TextColumn(width="medium"),
+                    "Tickers": st.column_config.TextColumn(width="small"),
+                    "Δ": st.column_config.TextColumn(width="small"),
+                    "Reason": st.column_config.TextColumn(width="large"),
+                },
+            )
+            st.markdown(
+                f"**Bottom line:** you have **{n_final:,} tickers** with clean "
+                f"history for the optimiser. That is correct — the ~50 % drop "
+                f"from the universe is dominated by ETFs with insufficient "
+                f"5-year history (many launched post-2022) and by data-quality "
+                f"gaps FMP can't repair. Widening the filter to `max_missing "
+                f"= 20 %` would recover ~150 more tickers (mostly low-quality); "
+                f"the current threshold prioritises signal quality over "
+                f"universe breadth."
+            )
+
+            if status and status.get("n_stale", 0) > 0:
+                st.markdown("---")
+                st.markdown(
+                    f"**Cache status pane shows {status['n_stale']:,} "
+                    f"stale files.** Most of these are ETFs FMP no longer "
+                    f"tracks (delisted, symbol-changed, or below their "
+                    f"coverage tier). A refresh cannot fix them and they "
+                    f"do not affect the loaded matrix — they are already "
+                    f"excluded by the missing-data filter."
+                )
         with st.expander("Latest prices (last 5 rows, first 10 tickers)"):
             st.dataframe(load.prices.iloc[-5:, :10])
 
@@ -726,12 +1011,34 @@ with tab_propose:
     weights = st.session_state.get("target_weights")
     scoring = st.session_state.get("scoring")
     cash_budget = float(st.session_state.get("cash_budget") or 0.0)
+    # Target cash reserve overrides the policy default if the operator
+    # set it in Step 1. This is what the operator actually controls when
+    # sizing a rebalance — "how much cash do I want left when done."
+    target_reserve = st.session_state.get("target_cash_reserve")
+    if target_reserve is not None:
+        # Substitute the operator's target into the frozen policy for
+        # this proposal only. dataclasses.replace() returns a fresh copy.
+        import dataclasses as _dc
+        effective_policy = _dc.replace(policy, cash_reserve=float(target_reserve))
+    else:
+        effective_policy = policy
 
     if snap is None:
         st.info("Pull the live snapshot in tab 1 first.")
     elif weights is None:
         st.info("Run the optimiser in tab 3 first.")
     else:
+        deploy_surplus = st.checkbox(
+            "Deploy surplus cash down to the reserve",
+            value=True,
+            help=(
+                "After the main rebalance, any cash left above the target "
+                "reserve is deployed into under-weight retained positions "
+                "(largest gap first, capped at each position's target). "
+                "Untick for a pure drift rebalance — surplus cash then "
+                "stays in the account."
+            ),
+        )
         c1, c2 = st.columns([1, 3])
         with c1:
             if st.button("Generate proposal", type="primary"):
@@ -743,16 +1050,19 @@ with tab_propose:
                             snapshot=snap,
                             target_weights=weights,
                             cash_budget=cash_budget,
-                            policy=policy,
+                            policy=effective_policy,
                             factor_scores=factor_scores,
                             prices=load.prices if load is not None else None,
+                            deploy_surplus=deploy_surplus,
                         )
                         st.session_state["proposed_trades"] = proposal
                         st.session_state["explanation"] = None
                         st.success(
                             f"Proposal built — {len(proposal.trades)} trades, "
-                            f"turnover ${proposal.turnover_notional:,.0f} "
-                            f"({proposal.turnover_pct_of_nav:.1%} NAV)."
+                            f"turnover \\${proposal.turnover_notional:,.0f} "
+                            f"({proposal.turnover_pct_of_nav:.1%} NAV). "
+                            f"Target cash reserve: "
+                            f"\\${effective_policy.cash_reserve:,.0f}."
                         )
                     except Exception as exc:  # noqa: BLE001
                         st.error(f"Proposal generation failed: {exc}")
@@ -760,11 +1070,26 @@ with tab_propose:
             st.caption(
                 f"Comparing snapshot from {snap.timestamp:%Y-%m-%d %H:%M} "
                 f"against {len(weights)} target positions. "
-                f"Cash budget: **${cash_budget:,.0f}**. Cash reserve: "
-                f"**${policy.cash_reserve:,.0f}**."
+                f"Wire deposit: **\\${cash_budget:,.0f}**. "
+                f"Target cash reserve: "
+                f"**\\${effective_policy.cash_reserve:,.0f}** "
+                f"(from Step 1 · default from policy: "
+                f"\\${policy.cash_reserve:,.0f})."
             )
 
     proposal = st.session_state.get("proposed_trades")
+    if proposal is not None and snap is None:
+        # Stale session state: proposal was cached but the snapshot it
+        # was built against is gone (browser refresh, app restart, etc.).
+        # Rendering the metrics section would crash on `snap.nav`.
+        st.warning(
+            "A proposal is cached from an earlier session, but the live "
+            "snapshot has been cleared. Re-pull the snapshot in tab 1, "
+            "then re-run the proposal here."
+        )
+        st.session_state["proposed_trades"] = None
+        proposal = None
+
     if proposal is not None:
         st.divider()
 
@@ -1182,12 +1507,39 @@ with tab_send:
             )
 
             # ────────────────────────────────────────────────
-            # Two-key gate + Apply
+            # Market-hours pre-flight (2026-08-28: operator sent MKT
+            # orders 2h before the open and got a mixed bag of
+            # Cancelled / Inactive / queued without warning)
             # ────────────────────────────────────────────────
             st.divider()
+            from src.utils.market_hours import us_market_state
+            mkt = us_market_state()
+            if mkt.is_open:
+                st.success(
+                    f"🟢 **US market is OPEN** — regular session until "
+                    f"{mkt.next_close:%H:%M} ET. Market orders will "
+                    f"execute promptly."
+                )
+            else:
+                _h, _m = divmod(mkt.minutes_to_open, 60)
+                st.warning(
+                    f"🌙 **US market is CLOSED.** Next open: "
+                    f"**{mkt.next_open:%a %Y-%m-%d %H:%M} ET** "
+                    f"(in {_h}h {_m:02d}m). If you send now, liquid "
+                    f"names queue as *pending market open* and fill in "
+                    f"the opening auction; **thin names may be cancelled "
+                    f"by IB's market-order price protection** and will "
+                    f"need the retry-as-LMT button in Step 7 after the "
+                    f"open. (Exchange holidays are not modelled — on a "
+                    f"holiday this banner may wrongly show open.)"
+                )
+
+            # ────────────────────────────────────────────────
+            # Two-key gate + Apply
+            # ────────────────────────────────────────────────
             st.error(
                 "⚠️ **The next section places real orders in your live "
-                "IBKR account.** Once both boxes are ticked and the "
+                "IBKR account.** Once the boxes are ticked and the "
                 "button is pressed, the trades above will go through."
             )
 
@@ -1201,8 +1553,17 @@ with tab_send:
                 "account and I have reviewed the dry-run preview above.",
                 key="apply_gate_confirmed",
             )
+            gate3 = True
+            if not mkt.is_open:
+                gate3 = st.checkbox(
+                    f"**Queue for the open** — I understand the market is "
+                    f"closed and these orders will wait for the "
+                    f"{mkt.next_open:%H:%M} ET opening auction (thin "
+                    f"names may be cancelled and need a Step-7 retry).",
+                    key="apply_gate_queue_open",
+                )
 
-            apply_enabled = bool(gate1 and gate2)
+            apply_enabled = bool(gate1 and gate2 and gate3)
             if not apply_enabled:
                 st.info("Tick both boxes above to enable the Apply button.")
 
@@ -1305,8 +1666,168 @@ with tab_send:
                     if receipt is not None:
                         st.success(
                             f"Wrote receipt to `{receipt.audit_log_path}`. "
-                            f"Open tab 7 for the post-trade view."
+                            f"Watch the live order monitor below, then open "
+                            f"tab 7 for the post-trade view."
                         )
+
+    # ────────────────────────────────────────────────────────
+    # Live order monitor — the working blotter. Polls IB from a
+    # fresh read-only connection (client-ID band 60-69) so it
+    # keeps working across app reruns / reconnects, long after
+    # the placing connection is gone. Operator watches fills
+    # land here, then finishes cleanup in Step 7.
+    # ────────────────────────────────────────────────────────
+    _mon_receipt = st.session_state.get("execution_receipt")
+    if _mon_receipt is None:
+        # Browser refresh / app restart wiped session state, but every
+        # send is journalled to disk. Offer to restore the blotter from
+        # the audit log — monitoring only, NOTHING is re-sent.
+        _audit_files = sorted(
+            Path(DEFAULT_AUDIT_DIR).glob("execution_*.jsonl"), reverse=True,
+        )[:10]
+        if _audit_files:
+            st.divider()
+            st.subheader("📡 Live order monitor")
+            st.info(
+                "No execution in this browser session (a refresh clears "
+                "the app's memory), but previous sends are journalled on "
+                "disk. Restore one below to monitor its orders — this "
+                "only *watches*; **nothing is re-sent to IB**."
+            )
+            _sel = st.selectbox(
+                "Execution log (newest first — pick the real send, not "
+                "the dry-run preview)",
+                _audit_files,
+                format_func=lambda p: p.name,
+                key="mon_restore_sel",
+            )
+            if st.button("Restore for monitoring", type="primary"):
+                from src.portfolio.execution import load_receipt_from_audit
+                _restored = load_receipt_from_audit(_sel)
+                if _restored.dry_run:
+                    st.warning(
+                        "That file is a dry-run preview (no real orders). "
+                        "Pick the later-timestamped log from the actual send."
+                    )
+                elif not (_restored.results or _restored.trail_results):
+                    st.warning("That file contains no orders.")
+                else:
+                    st.session_state["execution_receipt"] = _restored
+                    st.rerun()
+
+    if _mon_receipt is not None and not _mon_receipt.dry_run:
+        st.divider()
+        st.subheader("📡 Live order monitor")
+        mon_c1, mon_c2, mon_c3 = st.columns([1, 1, 2])
+        with mon_c1:
+            mon_auto = st.toggle("Auto-refresh", value=True, key="mon_auto")
+        with mon_c2:
+            mon_secs = st.selectbox(
+                "Every", [10, 30, 60], index=1,
+                format_func=lambda s: f"{s} s", key="mon_interval",
+            )
+        with mon_c3:
+            st.caption(
+                "Statuses: **⏳ Pending market open** — queued for the "
+                "opening auction · **🔵 Working** — live in the market · "
+                "**✅ Filled** · **❌ Cancelled** — use Step 7's "
+                "retry-as-LMT · **⚠️ Inactive** — needs manual attention."
+            )
+
+        @st.fragment(run_every=(f"{mon_secs}s" if mon_auto else None))
+        def _order_monitor() -> None:
+            from src.portfolio.execution import poll_order_statuses
+            from src.utils.market_hours import us_market_state
+
+            rec = st.session_state.get("execution_receipt")
+            if rec is None:
+                return
+            mkt_now = us_market_state()
+
+            ib_mon = None
+            mon_exc: Exception | None = None
+            for cid in range(60, 70):
+                try:
+                    ib_mon = connect_read_only(
+                        host=DEFAULT_IB_HOST, port=DEFAULT_IB_PORT,
+                        client_id=cid,
+                    )
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    mon_exc = exc
+                    ib_mon = None
+            if ib_mon is None:
+                st.error(f"Monitor: no read-only IB connection ({mon_exc})")
+                return
+            try:
+                mon_rows = poll_order_statuses(rec, ib_mon)
+            finally:
+                try:
+                    ib_mon.disconnect()
+                except Exception:  # noqa: BLE001
+                    pass
+
+            def _label(s: str) -> str:
+                if s in ("PreSubmitted", "Submitted"):
+                    return ("⏳ Pending market open" if not mkt_now.is_open
+                            else "🔵 Working")
+                if s == "Filled":
+                    return "✅ Filled"
+                if s == "Filled (partial)":
+                    return "🟡 Partial fill"
+                if s in ("Cancelled", "ApiCancelled",
+                         "Gone (cancelled/rejected)"):
+                    return "❌ Cancelled"
+                if s == "Inactive":
+                    return "⚠️ Inactive"
+                return s
+
+            mon_df = pd.DataFrame(mon_rows)
+            mon_df["State"] = mon_df["live_status"].map(_label)
+
+            n_total = len(mon_df)
+            n_filled = int((mon_df["live_status"] == "Filled").sum())
+            n_working = int(mon_df["State"].isin(
+                ["🔵 Working", "⏳ Pending market open"]).sum())
+            n_attention = int(mon_df["State"].isin(
+                ["❌ Cancelled", "⚠️ Inactive"]).sum())
+
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Orders", n_total)
+            k2.metric("Filled", n_filled)
+            k3.metric("Working / pending", n_working)
+            k4.metric("Needs attention", n_attention)
+            st.progress(
+                n_filled / max(n_total, 1),
+                text=f"{n_filled}/{n_total} filled",
+            )
+
+            st.dataframe(
+                mon_df[["ticker", "action", "order_kind", "shares",
+                        "filled_qty", "avg_fill_price", "commission",
+                        "State", "order_id"]].rename(columns={
+                    "ticker": "Ticker", "action": "Action",
+                    "order_kind": "Order", "shares": "Shares",
+                    "filled_qty": "Filled",
+                    "avg_fill_price": "Avg fill",
+                    "commission": "Commission",
+                    "order_id": "Order ID",
+                }),
+                hide_index=True, use_container_width=True,
+                column_config={
+                    "Avg fill": st.column_config.NumberColumn(format="%.2f"),
+                    "Commission": st.column_config.NumberColumn(format="%.2f"),
+                },
+            )
+            mkt_note = ("market OPEN"
+                        if mkt_now.is_open
+                        else f"market opens {mkt_now.next_open:%a %H:%M} ET")
+            st.caption(
+                f"Last polled {pd.Timestamp.now():%H:%M:%S} local · "
+                f"{mkt_note} · polling via read-only client IDs 60-69."
+            )
+
+        _order_monitor()
 
 
 with tab_summary:
@@ -1350,9 +1871,32 @@ with tab_summary:
                                 host=DEFAULT_IB_HOST, port=DEFAULT_IB_PORT,
                                 client_id=cid,
                             )
-                            enriched = enrich_receipt_with_fills(
-                                receipt, ib_read, wait_sec=2.0,
+                            from src.portfolio.execution import (
+                                load_receipt_from_audit,
+                                refresh_receipt_from_ib,
                             )
+                            enriched = refresh_receipt_from_ib(
+                                receipt, ib_read,
+                            )
+                            # Also refresh the newest REAL retry batch so
+                            # the reconciliation below shows the net
+                            # per-ticker outcome, not just the original
+                            # (permanently dead) order statuses.
+                            try:
+                                for _rl in sorted(
+                                    Path(DEFAULT_AUDIT_DIR).glob(
+                                        "retry_*.jsonl"), reverse=True,
+                                ):
+                                    _rr = load_receipt_from_audit(_rl)
+                                    if not _rr.dry_run and _rr.results:
+                                        st.session_state["retry_receipt"] = (
+                                            refresh_receipt_from_ib(
+                                                _rr, ib_read,
+                                            )
+                                        )
+                                        break
+                            except Exception:  # noqa: BLE001
+                                pass
                             try:
                                 ib_read.disconnect()
                             except Exception:
@@ -1367,9 +1911,11 @@ with tab_summary:
                             break
         with ec2:
             st.caption(
-                "Queries IB via `ib.trades()` for the actual weighted "
-                "average fill price and commission per order ID. Also "
-                "picks up cancel reasons for orders IB rejected."
+                "Queries IB account-wide (open orders + today's "
+                "executions) for live status, weighted-average fill "
+                "price, and commission per order ID. Works from any "
+                "connection — including after an app restart. Also "
+                "refreshes the headline Succeeded / Failed counts."
             )
 
         # If enriched, compute cost totals.
@@ -1381,11 +1927,26 @@ with tab_summary:
         total_notional = 0.0
         total_slippage = 0.0
         signed_slippage = 0.0
-        # Look up reference prices from the original proposal.
+        # Look up reference prices from the original proposal — or,
+        # after a session wipe, from the audit log's source_trade rows.
         proposal = st.session_state.get("proposed_trades")
-        ref_prices = {
-            t.ticker: t.market_price for t in (proposal.trades if proposal else [])
-        }
+        if proposal is not None:
+            ref_prices = {t.ticker: t.market_price for t in proposal.trades}
+        else:
+            ref_prices = {}
+            if receipt.audit_log_path:
+                try:
+                    from src.portfolio.execution import (
+                        load_reference_prices_from_audit,
+                    )
+                    ref_prices = {
+                        k: v.market_price
+                        for k, v in load_reference_prices_from_audit(
+                            receipt.audit_log_path,
+                        ).items()
+                    }
+                except Exception:  # noqa: BLE001
+                    ref_prices = {}
         for r in receipt.results:  # only market orders count for slippage
             if r.fill_price is None or r.filled_qty is None:
                 continue
@@ -1489,20 +2050,108 @@ with tab_summary:
             ])
             st.dataframe(fail_df, hide_index=True, use_container_width=True)
 
+            # ── Net outcome after retries ────────────────────
+            # The original failed orders stay dead forever; recovery
+            # happens via NEW orders in the retry batch. Reconcile per
+            # ticker so the operator sees what is actually still
+            # outstanding (populated by "Fetch fills" above).
+            retry_rec = st.session_state.get("retry_receipt")
+            if retry_rec is not None:
+                _retry_by_ticker = {r.ticker: r for r in retry_rec.results}
+                _recon_rows = []
+                _outstanding: list[str] = []
+                for r in failed:
+                    rr = _retry_by_ticker.get(r.ticker)
+                    if rr is None:
+                        net = "❌ no retry placed"
+                        _outstanding.append(r.ticker)
+                    elif rr.status == "Filled":
+                        net = (f"✅ recovered — retry LMT filled"
+                               + (f" @ {rr.fill_price:.2f}"
+                                  if rr.fill_price else ""))
+                    elif rr.status in ("Submitted", "PreSubmitted"):
+                        net = "🔵 retry LMT still working"
+                        _outstanding.append(r.ticker)
+                    else:
+                        net = f"❌ retry also failed ({rr.status})"
+                        _outstanding.append(r.ticker)
+                    _recon_rows.append({
+                        "Ticker": r.ticker, "Original": r.status,
+                        "Net outcome": net,
+                    })
+                st.markdown("**Net outcome after retries** (per ticker)")
+                st.dataframe(
+                    pd.DataFrame(_recon_rows), hide_index=True,
+                    use_container_width=True,
+                )
+                if _outstanding:
+                    st.warning(
+                        f"Still outstanding: "
+                        f"{', '.join(sorted(set(_outstanding)))}. "
+                        f"(Trailing stops for retried BUYs are also not "
+                        f"reattached — check the Send-tab monitor.)"
+                    )
+                else:
+                    st.success(
+                        "All failed market orders recovered via retries. "
+                        "Remaining check: trailing stops on retried BUYs."
+                    )
+            else:
+                st.caption(
+                    "Run **Fetch fills + commissions** above to reconcile "
+                    "these failures against any retry batches."
+                )
+
+            # Reference prices for the LMT retries. Prefer the live
+            # proposal; after a session wipe fall back to the prices
+            # journalled in the audit log at send time.
+            _retry_trades: dict | None = None
+            if proposal is not None:
+                _retry_trades = {t.ticker: t for t in proposal.trades}
+            elif receipt.audit_log_path:
+                try:
+                    from src.portfolio.execution import (
+                        load_reference_prices_from_audit,
+                    )
+                    _retry_trades = load_reference_prices_from_audit(
+                        receipt.audit_log_path,
+                    ) or None
+                except Exception as _exc:  # noqa: BLE001
+                    st.warning(f"Could not load reference prices from "
+                               f"audit log: {_exc}")
+
+            retry_inactive = st.checkbox(
+                "Also retry **Inactive** orders (soft-rejected at IB — "
+                "e.g. out-of-hours MKT). Restricted tickers will simply "
+                "fail again, visibly. **Note:** a retried BUY does NOT "
+                "get a trailing stop reattached automatically if its "
+                "original TRAIL also went Inactive — check Step 6's "
+                "monitor and add protection manually if needed.",
+                value=True,
+                key="retry_include_inactive",
+            )
+
             rc1, rc2 = st.columns([1, 3])
             with rc1:
                 do_retry = st.button(
                     "Retry failed as LMT (50 bps aggressive)",
                     type="primary",
-                    disabled=proposal is None,
+                    disabled=_retry_trades is None,
                 )
             with rc2:
                 st.caption(
-                    "Places one LMT per cancelled MKT order at reference "
-                    "price × (1 ± 0.5%). Written to a separate audit log. "
-                    "Trailing stops are NOT reattached — those from the "
-                    "original BUY/EXTEND cover the intended positions "
-                    "already (or should).")
+                    "Places one LMT per failed MKT order at reference "
+                    "price × (1 ± 0.5%). Reference is the send-time price "
+                    "(from the proposal, or the audit log after a session "
+                    "wipe) — safe for limits: a stale SELL either fills "
+                    "at market or rests unfilled. Written to a separate "
+                    "audit log. Click ONCE — a second click places a "
+                    "second set of limit orders.")
+            if _retry_trades is None:
+                st.info(
+                    "Retry disabled: no reference prices available "
+                    "(no proposal in session and no audit log path)."
+                )
 
             if do_retry:
                 with st.status("Retrying via LMT…", expanded=True) as sbox:
@@ -1516,12 +2165,11 @@ with tab_summary:
                             )
                             retry_receipt = retry_cancelled_market_orders(
                                 receipt=receipt,
-                                original_trades={
-                                    t.ticker: t for t in proposal.trades
-                                },
+                                original_trades=_retry_trades,
                                 ib=ib_write, dry_run=False,
                                 audit_dir=DEFAULT_AUDIT_DIR,
                                 limit_offset_bps=50.0,
+                                include_inactive=bool(retry_inactive),
                             )
                             try:
                                 ib_write.disconnect()

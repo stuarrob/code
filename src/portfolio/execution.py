@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Protocol
@@ -525,6 +525,218 @@ def enrich_receipt_with_fills(
 
 
 # ────────────────────────────────────────────────────────────────
+# Receipt recovery — rebuild from the audit JSONL on disk
+# ────────────────────────────────────────────────────────────────
+
+def load_receipt_from_audit(path: Path) -> ExecutionReceipt:
+    """Rebuild an ExecutionReceipt from an audit JSONL written at send time.
+
+    Session state dies on a browser refresh / app restart, but every
+    placement is journalled to disk by `_write_audit`. This lets the
+    applet's order monitor resume watching a send it did not perform in
+    the current session — WITHOUT re-sending anything.
+
+    Args:
+        path: an `execution_*.jsonl` file under the audit dir. Each line
+            is `asdict(OrderResult)` plus an optional `source_trade` dict
+            (ignored here).
+
+    Returns:
+        ExecutionReceipt with results/trail_results split on order_kind.
+        `dry_run` is True when every row has status DRY_RUN (i.e. the
+        file is a preview, not a real send).
+    """
+    path = Path(path)
+    known = {f.name for f in fields(OrderResult)}
+    results: list[OrderResult] = []
+    trails: list[OrderResult] = []
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            d = json.loads(line)
+            r = OrderResult(**{k: v for k, v in d.items() if k in known})
+            (trails if r.order_kind == "TRAIL" else results).append(r)
+    all_rows = results + trails
+    timestamps = sorted(r.timestamp for r in all_rows) if all_rows else []
+    return ExecutionReceipt(
+        started_at=timestamps[0] if timestamps else "",
+        finished_at=timestamps[-1] if timestamps else "",
+        dry_run=bool(all_rows) and all(r.status == "DRY_RUN" for r in all_rows),
+        n_trades=len(results),
+        results=tuple(results),
+        trail_results=tuple(trails),
+        audit_log_path=str(path),
+    )
+
+
+def load_reference_prices_from_audit(path: Path) -> dict[str, object]:
+    """Rebuild the `{ticker → trade-like}` map the retry pass needs.
+
+    `retry_cancelled_market_orders` only reads `.market_price` off each
+    original Trade (as the LMT reference). The audit JSONL stores that
+    price per order in `source_trade.market_price`, so after a session
+    wipe we can reconstruct a duck-typed stand-in without the original
+    proposal. Note the reference is the price AT SEND TIME — for a
+    limit order this is safe by construction (a stale-priced SELL LMT
+    either fills at market or rests unfilled; it cannot fill badly).
+
+    Returns:
+        `{ticker: SimpleNamespace(market_price=float)}` for every row
+        in the file that carries a `source_trade` price.
+    """
+    from types import SimpleNamespace
+
+    path = Path(path)
+    out: dict[str, object] = {}
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            d = json.loads(line)
+            src = d.get("source_trade") or {}
+            px = src.get("market_price")
+            ticker = d.get("ticker")
+            if ticker and px:
+                out[ticker] = SimpleNamespace(market_price=float(px))
+    return out
+
+
+# ────────────────────────────────────────────────────────────────
+# Live order monitor — poll from a FRESH (read-only) connection
+# ────────────────────────────────────────────────────────────────
+
+def poll_order_statuses(receipt: ExecutionReceipt, ib) -> list[dict]:
+    """Live status for every order in `receipt`, from any IB connection.
+
+    Unlike `enrich_receipt_with_fills` (which relies on `ib.trades()` and
+    therefore only works on the SAME connection that placed the orders),
+    this uses account-wide requests so the applet's monitor panel can
+    poll from a fresh read-only connection long after the placing
+    session disconnected:
+
+      - `ib.reqAllOpenOrders()`  — working orders across all client IDs
+      - `ib.reqExecutions()`     — today's executions account-wide
+
+    Matching key is (order_id, ticker). IB order ids are per-client, but
+    within one applet session the (id, symbol) pair is unambiguous.
+
+    Returns:
+        One dict per order (main orders then TRAILs) with keys:
+        ticker, action, order_kind, shares, order_id, live_status,
+        filled_qty, avg_fill_price, commission. `live_status` is one of
+        IB's states (Submitted / PreSubmitted / Filled / Inactive / …),
+        "Filled (partial)" when executions exist but the order is gone,
+        or "Gone (cancelled/rejected)" when neither working nor filled.
+    """
+    from ib_insync import ExecutionFilter
+
+    open_by_key: dict[tuple, object] = {}
+    try:
+        for tr in ib.reqAllOpenOrders():
+            open_by_key[(tr.order.orderId, tr.contract.symbol)] = tr
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"poll_order_statuses: reqAllOpenOrders failed: {exc}")
+
+    fills_qty: dict[tuple, float] = {}
+    fills_notional: dict[tuple, float] = {}
+    fills_commission: dict[tuple, float] = {}
+    try:
+        for f in ib.reqExecutions(ExecutionFilter()):
+            key = (f.execution.orderId, f.contract.symbol)
+            qty = float(f.execution.shares)
+            fills_qty[key] = fills_qty.get(key, 0.0) + qty
+            fills_notional[key] = (
+                fills_notional.get(key, 0.0) + qty * float(f.execution.price)
+            )
+            comm = getattr(getattr(f, "commissionReport", None),
+                           "commission", None)
+            if comm:
+                fills_commission[key] = (
+                    fills_commission.get(key, 0.0) + float(comm)
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"poll_order_statuses: reqExecutions failed: {exc}")
+
+    rows: list[dict] = []
+    for r in list(receipt.results) + list(receipt.trail_results):
+        row = {
+            "ticker": r.ticker, "action": r.action,
+            "order_kind": r.order_kind, "shares": r.shares,
+            "order_id": r.order_id,
+            "live_status": r.status,       # fallback: status at placement
+            "filled_qty": 0, "avg_fill_price": None, "commission": None,
+        }
+        if r.order_id is None:            # ERROR / DRY_RUN rows
+            rows.append(row)
+            continue
+        key = (r.order_id, r.ticker)
+        qty = fills_qty.get(key, 0.0)
+        if qty > 0:
+            row["filled_qty"] = int(qty)
+            row["avg_fill_price"] = fills_notional[key] / qty
+            row["commission"] = fills_commission.get(key)
+        if qty >= r.shares > 0:
+            row["live_status"] = "Filled"
+        elif key in open_by_key:
+            tr = open_by_key[key]
+            row["live_status"] = tr.orderStatus.status or "Submitted"
+            row["filled_qty"] = int(tr.orderStatus.filled or qty)
+        elif qty > 0:
+            row["live_status"] = "Filled (partial)"
+        elif r.status in ("Cancelled", "Inactive", "ApiCancelled"):
+            row["live_status"] = r.status   # terminal at placement time
+        else:
+            row["live_status"] = "Gone (cancelled/rejected)"
+        rows.append(row)
+    return rows
+
+
+def refresh_receipt_from_ib(receipt: ExecutionReceipt, ib) -> ExecutionReceipt:
+    """Update every OrderResult with live status / fills / commissions.
+
+    Works from ANY connection (read-only included) because it rides on
+    `poll_order_statuses` (account-wide reqAllOpenOrders +
+    reqExecutions), unlike `enrich_receipt_with_fills` whose
+    `ib.trades()` only sees orders placed by the same client session.
+    Use this after a session restore, or any time the placing
+    connection is gone.
+    """
+    rows = poll_order_statuses(receipt, ib)
+    n_main = len(receipt.results)
+    # poll_order_statuses emits rows positionally: results then trails.
+    main_rows, trail_rows = rows[:n_main], rows[n_main:]
+
+    def _apply(r: OrderResult, row: dict) -> OrderResult:
+        return OrderResult(
+            ticker=r.ticker, action=r.action, order_kind=r.order_kind,
+            shares=r.shares, limit_or_trail_pct=r.limit_or_trail_pct,
+            order_id=r.order_id,
+            status=row["live_status"],
+            message=r.message, timestamp=r.timestamp,
+            fill_price=row["avg_fill_price"] or r.fill_price,
+            filled_qty=(row["filled_qty"] or None) or r.filled_qty,
+            commission=row["commission"] or r.commission,
+            cancel_reason=r.cancel_reason,
+        )
+
+    return ExecutionReceipt(
+        started_at=receipt.started_at,
+        finished_at=receipt.finished_at,
+        dry_run=receipt.dry_run,
+        n_trades=receipt.n_trades,
+        results=tuple(_apply(r, row)
+                      for r, row in zip(receipt.results, main_rows)),
+        trail_results=tuple(_apply(r, row)
+                            for r, row in zip(receipt.trail_results, trail_rows)),
+        errors=receipt.errors,
+        audit_log_path=receipt.audit_log_path,
+    )
+
+
+# ────────────────────────────────────────────────────────────────
 # Retry: resubmit cancelled orders as marketable-limit
 # ────────────────────────────────────────────────────────────────
 
@@ -536,6 +748,7 @@ def retry_cancelled_market_orders(
     audit_dir: Path = DEFAULT_AUDIT_DIR,
     limit_offset_bps: float = 50.0,
     ack_wait_sec: float = _ACK_WAIT_SEC,
+    include_inactive: bool = False,
 ) -> ExecutionReceipt:
     """Re-submit any market orders that came back Cancelled as LMTs.
 
@@ -567,10 +780,20 @@ def retry_cancelled_market_orders(
     started_at = _now_iso()
     results: list[OrderResult] = []
 
-    cancelled = [
-        r for r in receipt.results
-        if r.status.lower().startswith("cancel") and r.order_kind == "MKT"
-    ]
+    def _is_retryable(r: OrderResult) -> bool:
+        if r.order_kind != "MKT":
+            return False
+        s = r.status.lower()
+        if s.startswith("cancel"):
+            return True
+        # Inactive = accepted-but-dead at IB (soft reject, restriction,
+        # out-of-hours MKT). IB never reactivates these; re-placing as a
+        # marketable LMT is the standard remediation. Opt-in because a
+        # restricted ticker (e.g. unvested employer stock) will simply
+        # fail again — visibly, with IB's reason in the result row.
+        return include_inactive and s == "inactive"
+
+    cancelled = [r for r in receipt.results if _is_retryable(r)]
 
     try:
         for r in cancelled:

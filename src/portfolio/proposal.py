@@ -140,6 +140,7 @@ def propose_trades(
     cost_model: Optional[TransactionCostModel] = None,
     min_trade_notional: float = DEFAULT_MIN_TRADE_NOTIONAL,
     prices: Optional[pd.DataFrame] = None,
+    deploy_surplus: bool = False,
 ) -> TradeProposal:
     """Compute the trade blotter that gets from `snapshot` to `target_weights`.
 
@@ -166,6 +167,17 @@ def propose_trades(
             without this fallback, fresh BUYs get skipped with a
             "no market price" warning. When provided, uses the LAST
             available close per ticker.
+        deploy_surplus: when True, a post-pass deploys any cash left
+            above `policy.cash_reserve` into under-weight RETAINED
+            positions that the asymmetric-drift whipsaw guard skipped
+            (largest dollar gap first, capped at each position's target,
+            each top-up >= min_trade_notional, never pushing cash below
+            the reserve). Default False so pure rebalances keep the
+            whipsaw guard exactly as pinned by
+            TestCashNeutralityInvariant. The applet sets this True —
+            its Step-1 "target cash reserve" semantics mean the
+            operator explicitly wants cash deployed down to the
+            reserve.
 
     Returns:
         TradeProposal.
@@ -378,6 +390,86 @@ def propose_trades(
             f"SELLs ${sells_notional:,.0f}). Reduces exposure but "
             f"preserves relative BUY weights."
         )
+
+    # ────────────────────────────────────────────────────────────
+    # SURPLUS DEPLOYMENT — deploy-to-reserve (2026-08-28)
+    # ────────────────────────────────────────────────────────────
+    # Root cause this addresses: with drift_threshold = 5pp of NAV and
+    # ~30 positions of 2-6% weight each, a retained position can never
+    # be under-weight by more than its own target weight, so the
+    # whipsaw guard skips EVERY retained top-up. SELLs (exits + trims)
+    # then raise more cash than the BUYs absorb and the excess pools
+    # above the reserve. When the operator has explicitly set a target
+    # reserve (deploy_surplus=True), route that excess back into the
+    # under-weight retained names. Each top-up is capped at the
+    # position's target, so this can never overshoot; the loop budget
+    # is the surplus itself, so cash can never fall below the reserve.
+    if deploy_surplus:
+        buys_now = sum(t.delta_notional for t in trades if t.delta_shares > 0)
+        sells_now = sum(t.delta_notional for t in trades if t.delta_shares < 0)
+        costs_now = sum(t.est_cost for t in trades)
+        surplus = (
+            float(snapshot.cash) + float(cash_budget)
+            + sells_now - buys_now - costs_now
+            - float(policy.cash_reserve)
+        )
+        if surplus > min_trade_notional:
+            traded_tickers = {t.ticker for t in trades}
+            candidates: list[tuple[float, str, float, float, float]] = []
+            for ticker in target_weights.index:
+                tgt_pct = float(target_weights.get(ticker, 0.0))
+                if tgt_pct <= 0.0 or ticker in traded_tickers:
+                    continue
+                cur_shares, price, cur_value = current.get(ticker, (0, 0.0, 0.0))
+                if cur_shares <= 0:
+                    continue  # fresh BUYs were already sized to full target
+                if price <= 0:
+                    price = fallback_price.get(ticker, 0.0)
+                if price <= 0:
+                    continue
+                gap_value = tgt_pct * investable_nav - cur_value
+                if gap_value >= min_trade_notional:
+                    candidates.append(
+                        (gap_value, ticker, float(cur_shares), price, cur_value)
+                    )
+
+            candidates.sort(reverse=True)  # largest dollar gap first
+            deployed = 0.0
+            n_topped = 0
+            for gap_value, ticker, cur_shares, price, cur_value in candidates:
+                alloc = min(gap_value, surplus)
+                add_shares = int(alloc / price)
+                notional = add_shares * price
+                if add_shares == 0 or notional < min_trade_notional:
+                    continue
+                cost = cost_model.calculate_trade_cost(notional, is_buy=True)
+                if notional + cost > surplus:
+                    continue
+                cur_pct = cur_value / float(snapshot.nav) if snapshot.nav > 0 else 0.0
+                tgt_pct = float(target_weights.get(ticker, 0.0))
+                trades.append(Trade(
+                    ticker=ticker, action=ACTION_EXTEND,
+                    current_shares=int(cur_shares),
+                    target_shares=int(cur_shares) + add_shares,
+                    delta_shares=add_shares,
+                    market_price=float(price),
+                    delta_notional=float(notional),
+                    est_cost=float(cost),
+                    current_weight_pct=float(cur_pct),
+                    target_weight_pct=float(tgt_pct),
+                    weight_gap_pct=float(tgt_pct - cur_pct),
+                ))
+                surplus -= notional + cost
+                deployed += notional
+                n_topped += 1
+                if surplus < min_trade_notional:
+                    break
+            if n_topped:
+                warnings.append(
+                    f"Deploy-to-reserve: topped up {n_topped} under-weight "
+                    f"retained position(s) with ${deployed:,.0f} of surplus "
+                    f"cash (target reserve ${policy.cash_reserve:,.0f})."
+                )
 
     # Aggregate metrics.
     turnover_notional = sum(t.delta_notional for t in trades)

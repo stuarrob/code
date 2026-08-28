@@ -484,6 +484,19 @@ class TestCashNeutralityInvariant:
             for w in proposal.warnings
         ), f"Expected cash-constrained warning, got: {list(proposal.warnings)}"
 
+    def test_deploy_surplus_default_off_preserves_whipsaw_guard(self):
+        """deploy_surplus defaults to False: the under-weight retained
+        skip must behave exactly as before even with surplus cash."""
+        snap = _snapshot(
+            nav=100_000, cash=20_000,
+            positions=(_position("HELD", 40, 100.0),),  # $4k = 4% NAV
+        )
+        target = pd.Series({"HELD": 0.05})
+        proposal = propose_trades(
+            snap, target, 0, _policy(cash_reserve=5_000, drift=0.05),
+        )
+        assert len(proposal.trades) == 0
+
     def test_normal_proposal_unchanged_when_cash_ok(self):
         """Regression: a proposal that already respects the cash constraint
         must not be modified by the fix."""
@@ -509,3 +522,92 @@ class TestCashNeutralityInvariant:
             "cash-constrained" in w.lower() or "scaled" in w.lower()
             for w in proposal.warnings
         )
+
+
+# ────────────────────────────────────────────────────────────────
+# Deploy-to-reserve surplus pass (2026-08-28)
+# ────────────────────────────────────────────────────────────────
+
+class TestDeploySurplus:
+    """Origin: 2026-08-28 — operator set a $30k target reserve on a
+    $403k account and the proposal left $61k in cash. Root cause:
+    drift_threshold (5pp of NAV) exceeds every per-position weight, so
+    the whipsaw guard skipped ALL retained top-ups, and SELL proceeds
+    pooled above the reserve. The deploy_surplus pass routes that
+    surplus into the skipped under-weight retained positions, capped
+    at target, never breaching the reserve."""
+
+    def test_topped_up_when_deploying(self):
+        """Under-weight retained + surplus cash + deploy_surplus=True
+        → EXTEND up to the position's target (not up to the surplus)."""
+        snap = _snapshot(
+            nav=100_000, cash=20_000,
+            positions=(_position("HELD", 40, 100.0),),  # $4k = 4% NAV
+        )
+        # investable = 100k - 5k = 95k; target value = 0.05*95k = $4,750
+        # gap = $750 -> 7 shares at $100.
+        target = pd.Series({"HELD": 0.05})
+        proposal = propose_trades(
+            snap, target, 0, _policy(cash_reserve=5_000, drift=0.05),
+            deploy_surplus=True,
+        )
+        assert len(proposal.trades) == 1
+        t = proposal.trades[0]
+        assert t.action == ACTION_EXTEND
+        assert t.delta_shares == 7  # int(750 / 100)
+        # Cash stays far above reserve — top-up is target-capped.
+        assert proposal.cash_after >= 5_000 - 1.0
+
+    def test_deployment_never_breaches_reserve(self):
+        """Gap larger than surplus → top-up limited by the surplus, and
+        post-trade cash stays at or above the reserve."""
+        snap = _snapshot(
+            nav=100_000, cash=6_050,
+            positions=(_position("HELD", 20, 100.0),),  # $2k = 2% NAV
+        )
+        # investable = 95k; target = $4,750; gap = $2,750.
+        # surplus = 6,050 - 5,000 = 1,050 -> at most 10 shares ($1,000).
+        target = pd.Series({"HELD": 0.05})
+        proposal = propose_trades(
+            snap, target, 0, _policy(cash_reserve=5_000, drift=0.05),
+            deploy_surplus=True,
+        )
+        assert len(proposal.trades) == 1
+        t = proposal.trades[0]
+        assert t.action == ACTION_EXTEND
+        assert t.delta_shares == 10
+        assert proposal.cash_after >= 5_000 - 1.0, (
+            f"Reserve breached: cash_after={proposal.cash_after:.0f}"
+        )
+
+    def test_deployment_caps_at_target(self):
+        """Surplus larger than gap → top-up stops at the target weight;
+        the remaining surplus stays in cash (no overshoot)."""
+        snap = _snapshot(
+            nav=100_000, cash=30_000,
+            positions=(_position("HELD", 20, 100.0),),  # $2k = 2% NAV
+        )
+        # investable = 95k; target = $4,750; gap = $2,750 -> 27 shares.
+        target = pd.Series({"HELD": 0.05})
+        proposal = propose_trades(
+            snap, target, 0, _policy(cash_reserve=5_000, drift=0.05),
+            deploy_surplus=True,
+        )
+        assert len(proposal.trades) == 1
+        t = proposal.trades[0]
+        assert t.delta_shares == 27  # int(2750 / 100) — target-capped
+        # Position after: $2k + $2.7k = $4.7k <= $4,750 target. No overshoot.
+        assert (20 + t.delta_shares) * 100.0 <= 0.05 * 95_000 + 100.0
+
+    def test_surplus_below_min_notional_does_nothing(self):
+        """Surplus smaller than min_trade_notional → no micro top-ups."""
+        snap = _snapshot(
+            nav=100_000, cash=5_300,  # surplus $300 < $500 min notional
+            positions=(_position("HELD", 20, 100.0),),
+        )
+        target = pd.Series({"HELD": 0.05})
+        proposal = propose_trades(
+            snap, target, 0, _policy(cash_reserve=5_000, drift=0.05),
+            deploy_surplus=True,
+        )
+        assert len(proposal.trades) == 0
